@@ -8,6 +8,7 @@
     <packaging>pom</packaging>
     <modules>
         <module>scylla-cdc-lib</module>
+        <module>scylla-cdc-printer</module>
     </modules>
 
     <properties>
