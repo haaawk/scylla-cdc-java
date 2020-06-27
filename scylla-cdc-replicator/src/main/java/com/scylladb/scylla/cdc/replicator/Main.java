@@ -36,6 +36,7 @@ import net.sourceforge.argparse4j.ArgumentParsers;
 import net.sourceforge.argparse4j.inf.ArgumentParser;
 import net.sourceforge.argparse4j.inf.ArgumentParserException;
 import net.sourceforge.argparse4j.inf.Namespace;
+import sun.misc.Signal;
 
 public class Main {
 
@@ -237,6 +238,7 @@ public class Main {
   private static void replicateChanges(
       String source, String destination, String keyspace, String table, ConsistencyLevel cl)
           throws InterruptedException, ExecutionException {
+    Signal.handle(new Signal("INT"), signal -> System.exit(0));
     try (Cluster sCluster = Cluster.builder().addContactPoint(source).build();
         Session sSession = sCluster.connect();
         Cluster dCluster = Cluster.builder().addContactPoint(destination).build();
