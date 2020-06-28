@@ -31,6 +31,7 @@ public class Worker {
   private final GenerationEndTimestampFetcher generationEndTimestampFetcher;
   private final ClusterObserver observer;
   private final AtomicReference<Date> lastTopologyChangeTime = new AtomicReference<>(new Date(0));
+  private final AtomicReference<Date> lastNonEmptySelectTime = new AtomicReference<>(new Date(0));
 
   public Worker(ChangeConsumer c, Reader<Change> sr, GenerationEndTimestampFetcher gr, ClusterObserver o) {
     consumer = c;
@@ -48,21 +49,28 @@ public class Worker {
   }
 
   private class Consumer implements Reader.DeferringConsumer<Change> {
+    private boolean empty = true;
 
     @Override
     public CompletableFuture<Void> consume(Change item) {
+      empty = false;
       return consumer.consume(item);
     }
 
     @Override
     public void finish() {
+      if (!empty) {
+        // There's a race condition here but it's ok - we don't have to store the last time.
+        // We won't be off by more than few ms.
+        lastNonEmptySelectTime.set(new Date());
+      }
     }
 
   }
 
   private CompletableFuture<Void> fetchChangesForTask(UpdateableGenerationMetadata g, Set<ByteBuffer> task,
       UUID start) {
-    return g.getEndTimestamp(lastTopologyChangeTime.get()).thenCompose(endTimestamp -> {
+    return g.getEndTimestamp(lastTopologyChangeTime.get(), lastNonEmptySelectTime.get()).thenCompose(endTimestamp -> {
       Date now = Date.from(Instant.now().minusSeconds(LATE_WRITES_WINDOW_SECONDS));
       boolean finished = endTimestamp.isPresent() && !now.before(endTimestamp.get());
       UUID end = UUIDs.endOf((finished ? endTimestamp.get() : now).getTime());

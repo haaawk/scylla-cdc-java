@@ -1,5 +1,6 @@
 package com.scylladb.cdc.worker;
 
+import java.time.Instant;
 import java.util.Date;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
@@ -19,12 +20,14 @@ public class UpdateableGenerationMetadata {
     metadata = m;
   }
 
-  public CompletableFuture<Optional<Date>> getEndTimestamp(Date lastTopologyChangeTime) {
+  public CompletableFuture<Optional<Date>> getEndTimestamp(Date lastTopologyChangeTime, Date lastNonEmptySelectTime) {
     synchronized(lock) {
       if (refreshFuture != null) {
         return refreshFuture;
       }
-      if (metadata.endTimestamp.isPresent() || !metadata.fetchTime.before(lastTopologyChangeTime)) {
+      Date nowMinus10s = Date.from(Instant.now().minusSeconds(10));
+      if (metadata.endTimestamp.isPresent()
+          || !(metadata.fetchTime.before(lastTopologyChangeTime) || lastNonEmptySelectTime.before(nowMinus10s))) {
         return FutureUtils.completed(metadata.endTimestamp);
       }
       Date time = new Date();

@@ -33,7 +33,8 @@ public class UpdateableGenerationMetadataTest {
     UpdateableGenerationMetadata tested = new UpdateableGenerationMetadata(meta, fetcher);
 
     {
-      CompletableFuture<Optional<Date>> fut = tested.getEndTimestamp(Date.from(fetchTime.toInstant().minusNanos(1)));
+      CompletableFuture<Optional<Date>> fut =
+          tested.getEndTimestamp(Date.from(fetchTime.toInstant().minusNanos(1)), new Date());
 
       verifyNoMoreInteractions(fetcher);
 
@@ -42,7 +43,8 @@ public class UpdateableGenerationMetadataTest {
     }
 
     {
-      CompletableFuture<Optional<Date>> fut = tested.getEndTimestamp(Date.from(fetchTime.toInstant().plusNanos(1)));
+      CompletableFuture<Optional<Date>> fut =
+          tested.getEndTimestamp(Date.from(fetchTime.toInstant().plusNanos(1)), new Date());
 
       verifyNoMoreInteractions(fetcher);
 
@@ -61,7 +63,7 @@ public class UpdateableGenerationMetadataTest {
     GenerationMetadata meta = new GenerationMetadata(fetchTime, startTs, endTs);
     UpdateableGenerationMetadata tested = new UpdateableGenerationMetadata(meta, fetcher);
 
-    CompletableFuture<Optional<Date>> fut = tested.getEndTimestamp(fetchTime);
+    CompletableFuture<Optional<Date>> fut = tested.getEndTimestamp(fetchTime, new Date());
 
     verifyNoMoreInteractions(fetcher);
 
@@ -84,14 +86,14 @@ public class UpdateableGenerationMetadataTest {
     GenerationMetadata meta = new GenerationMetadata(fetchTime, startTs, endTs);
     UpdateableGenerationMetadata tested = new UpdateableGenerationMetadata(meta, fetcher);
 
-    CompletableFuture<Optional<Date>> fut1 = tested.getEndTimestamp(newFetchTime);
+    CompletableFuture<Optional<Date>> fut1 = tested.getEndTimestamp(newFetchTime, new Date());
 
     verify(fetcher).fetch(startTs);
     verifyNoMoreInteractions(fetcher);
 
     assertFalse(fut1.isDone());
 
-    CompletableFuture<Optional<Date>> fut2 = tested.getEndTimestamp(newFetchTime);
+    CompletableFuture<Optional<Date>> fut2 = tested.getEndTimestamp(newFetchTime, new Date());
 
     verifyNoMoreInteractions(fetcher);
 
