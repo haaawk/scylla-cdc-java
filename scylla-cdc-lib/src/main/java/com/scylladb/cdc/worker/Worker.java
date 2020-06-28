@@ -8,6 +8,7 @@ import java.util.Queue;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -20,6 +21,8 @@ import com.scylladb.cdc.driver.ClusterObserver;
 import com.scylladb.cdc.driver.Reader;
 
 public class Worker {
+
+  private final Executor delayingExecutor = new DelayingExecutor();
 
   private static final FluentLogger logger = FluentLogger.forEnclosingClass();
   private final static int LATE_WRITES_WINDOW_SECONDS = 10;
@@ -65,7 +68,7 @@ public class Worker {
       UUID end = UUIDs.endOf((finished ? endTimestamp.get() : now).getTime());
       logger.atInfo().atMostEvery(10, TimeUnit.SECONDS).log("Fetching changes from window [%s, %s]", start, end);
       CompletableFuture<Void> fut = streamsReader.query(new Consumer(), new ArrayList<>(task), start, end);
-      return finished ? fut : fut.thenCompose(v -> fetchChangesForTask(g, task, end));
+      return finished ? fut : fut.thenComposeAsync(v -> fetchChangesForTask(g, task, end), delayingExecutor);
     });
   }
 
