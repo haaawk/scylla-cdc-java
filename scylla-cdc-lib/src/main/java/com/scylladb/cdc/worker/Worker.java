@@ -14,6 +14,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import com.datastax.driver.core.utils.UUIDs;
 import com.google.common.flogger.FluentLogger;
+import com.google.common.io.BaseEncoding;
 import com.scylladb.cdc.Change;
 import com.scylladb.cdc.ChangeConsumer;
 import com.scylladb.cdc.GenerationMetadata;
@@ -68,13 +69,22 @@ public class Worker {
 
   }
 
+  private static String streamIdToString(Set<ByteBuffer> task) {
+    if (task.isEmpty()) {
+      return "empty task";
+    }
+    byte[] bytes = new byte[16];
+    task.iterator().next().duplicate().get(bytes, 0, 16);
+    return BaseEncoding.base16().encode(bytes, 0, 16);
+  }
+
   private CompletableFuture<Void> fetchChangesForTask(UpdateableGenerationMetadata g, Set<ByteBuffer> task,
       UUID start) {
     return g.getEndTimestamp(lastTopologyChangeTime.get(), lastNonEmptySelectTime.get()).thenCompose(endTimestamp -> {
       Date now = Date.from(Instant.now().minusSeconds(LATE_WRITES_WINDOW_SECONDS));
       boolean finished = endTimestamp.isPresent() && !now.before(endTimestamp.get());
       UUID end = UUIDs.endOf((finished ? endTimestamp.get() : now).getTime());
-      logger.atInfo().atMostEvery(10, TimeUnit.SECONDS).log("Fetching changes from window [%s, %s]", start, end);
+      logger.atInfo().atMostEvery(10, TimeUnit.SECONDS).log("Fetching changes in %s from window [%s, %s] [%d, %d]", streamIdToString(task), start, end, start.timestamp(), end.timestamp());
       CompletableFuture<Void> fut = streamsReader.query(new Consumer(), new ArrayList<>(task), start, end);
       return finished ? fut : fut.thenComposeAsync(v -> fetchChangesForTask(g, task, end), delayingExecutor);
     });
