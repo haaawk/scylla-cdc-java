@@ -80,7 +80,9 @@ public class Master {
         vnode.add(s.key);
         s = streamsIt.hasNext() ? streamsIt.next() : null;
       }
-      tasks.add(vnode);
+      if (!vnode.isEmpty()) {
+        tasks.add(vnode);
+      }
     }
 
     if (s != null) {
@@ -89,7 +91,9 @@ public class Master {
         wraparoundVnode.add(streamsIt.next().key);
       }
     }
-    tasks.add(wraparoundVnode);
+    if (!wraparoundVnode.isEmpty()) {
+      tasks.add(wraparoundVnode);
+    }
 
     return tasks;
   }
