@@ -24,6 +24,7 @@ public final class FutureUtils {
 
       @Override
       public void onFailure(Throwable t) {
+        t.printStackTrace();
         result.completeExceptionally(t);
       }
     });
@@ -39,12 +40,14 @@ public final class FutureUtils {
         try {
           result.complete(consumer.apply(input));
         } catch (Exception e) {
+          e.printStackTrace();
           result.completeExceptionally(e);
         }
       }
 
       @Override
       public void onFailure(Throwable t) {
+        t.printStackTrace();
         result.completeExceptionally(t);
       }
     });
@@ -67,12 +70,14 @@ public final class FutureUtils {
             }
           });
         } catch (Exception e) {
+          e.printStackTrace();
           result.completeExceptionally(e);
         }
       }
 
       @Override
       public void onFailure(Throwable t) {
+        t.printStackTrace();
         result.completeExceptionally(t);
       }
     });

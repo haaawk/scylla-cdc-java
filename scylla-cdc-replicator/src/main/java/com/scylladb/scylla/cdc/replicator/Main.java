@@ -3,19 +3,28 @@ package com.scylladb.scylla.cdc.replicator;
 import static com.datastax.driver.core.querybuilder.QueryBuilder.addAll;
 import static com.datastax.driver.core.querybuilder.QueryBuilder.bindMarker;
 import static com.datastax.driver.core.querybuilder.QueryBuilder.eq;
+import static com.datastax.driver.core.querybuilder.QueryBuilder.gt;
+import static com.datastax.driver.core.querybuilder.QueryBuilder.gte;
+import static com.datastax.driver.core.querybuilder.QueryBuilder.lt;
+import static com.datastax.driver.core.querybuilder.QueryBuilder.lte;
 import static com.datastax.driver.core.querybuilder.QueryBuilder.putAll;
 import static com.datastax.driver.core.querybuilder.QueryBuilder.removeAll;
 import static com.datastax.driver.core.querybuilder.QueryBuilder.set;
 import static com.datastax.driver.core.querybuilder.QueryBuilder.timestamp;
 import static com.datastax.driver.core.querybuilder.QueryBuilder.ttl;
 
+import java.nio.ByteBuffer;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Iterator;
+import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.stream.Collectors;
 
@@ -28,6 +37,7 @@ import com.datastax.driver.core.ConsistencyLevel;
 import com.datastax.driver.core.DataType;
 import com.datastax.driver.core.PreparedStatement;
 import com.datastax.driver.core.RegularStatement;
+import com.datastax.driver.core.Row;
 import com.datastax.driver.core.Session;
 import com.datastax.driver.core.Statement;
 import com.datastax.driver.core.TableMetadata;
@@ -38,6 +48,7 @@ import com.datastax.driver.core.querybuilder.Insert;
 import com.datastax.driver.core.querybuilder.ListSetIdxTimeUUIDAssignment;
 import com.datastax.driver.core.querybuilder.QueryBuilder;
 import com.datastax.driver.core.querybuilder.Update;
+import com.google.common.io.BaseEncoding;
 import com.google.common.reflect.TypeToken;
 import com.scylladb.cdc.Change;
 import com.scylladb.cdc.ChangeConsumer;
@@ -146,8 +157,7 @@ public class Main {
         table.getColumns().stream().forEach(c -> {
           TypeCodec<Object> codec = CodecRegistry.DEFAULT_INSTANCE.codecFor(c.getType());
           if (primaryColumns.contains(c)) {
-            builder.where(
-                eq(c.getName(), change.row.get(c.getName(), codec)));
+            builder.where(eq(c.getName(), change.row.get(c.getName(), codec)));
           } else {
             Assignment op = null;
             if (c.getType().isCollection() && !c.getType().isFrozen() && !change.isDeleted(c.getName())) {
@@ -155,7 +165,7 @@ public class Main {
               TypeToken<Object> type = CodecRegistry.DEFAULT_INSTANCE.codecFor(innerType).getJavaType();
               TypeToken<Object> type2 = null;
               if (c.getType().getTypeArguments().size() > 1) {
-                type2 = CodecRegistry.DEFAULT_INSTANCE.codecFor(c.getType().getTypeArguments().get(1 )).getJavaType();
+                type2 = CodecRegistry.DEFAULT_INSTANCE.codecFor(c.getType().getTypeArguments().get(1)).getJavaType();
               }
               String deletedElementsColumnName = "cdc$deleted_elements_" + c.getName();
               if (!change.row.isNull(deletedElementsColumnName)) {
@@ -177,7 +187,8 @@ public class Main {
                 } else if (c.getType().getName() == DataType.Name.MAP) {
                   op = putAll(c.getName(), change.row.getMap(c.getName(), type, type2));
                 } else if (c.getType().getName() == DataType.Name.LIST) {
-                  for (Entry<UUID, Object> e : change.row.getMap(c.getName(), TypeToken.of(UUID.class), type).entrySet()) {
+                  for (Entry<UUID, Object> e : change.row.getMap(c.getName(), TypeToken.of(UUID.class), type)
+                      .entrySet()) {
                     builder.with(new ListSetIdxTimeUUIDAssignment(c.getName(), e.getKey(), e.getValue()));
                   }
                   return;
@@ -293,9 +304,167 @@ public class Main {
 
     }
 
+    private static class RangeDeleteStartOp implements Operation {
+      private final RangeTombstoneState state;
+      private final boolean inclusive;
+
+      public RangeDeleteStartOp(RangeTombstoneState rtState, boolean inclusive) {
+        state = rtState;
+        this.inclusive = inclusive;
+      }
+
+      @Override
+      public Statement getStatement(Change c, ConsistencyLevel cl) {
+        state.addStart(c, inclusive);
+        return null;
+      }
+
+    }
+
+    private static class RangeDeleteEndOp implements Operation {
+      private final TableMetadata table;
+      private final RangeTombstoneState state;
+      private final Map<Integer, Map<Boolean, PreparedStatement>> stmts = new HashMap<>();
+
+      private static PreparedStatement prepare(Session s, TableMetadata t, int prefixSize, boolean startInclusive,
+          boolean endInclusive) {
+        Delete builder = QueryBuilder.delete().from(t);
+        List<ColumnMetadata> pk = t.getPrimaryKey();
+        pk.subList(0, prefixSize).stream().forEach(c -> builder.where(eq(c.getName(), bindMarker(c.getName()))));
+        ColumnMetadata lastCk = pk.get(prefixSize);
+        builder.where(startInclusive ? gte(lastCk.getName(), bindMarker(lastCk.getName() + "_start"))
+            : gt(lastCk.getName(), bindMarker(lastCk.getName() + "_start")));
+        builder.where(endInclusive ? lte(lastCk.getName(), bindMarker(lastCk.getName() + "_end"))
+            : lt(lastCk.getName(), bindMarker(lastCk.getName() + "_end")));
+        builder.using(timestamp(bindMarker(TIMESTAMP_MARKER_NAME)));
+        return s.prepare(builder);
+      }
+
+      public RangeDeleteEndOp(Session session, TableMetadata t, RangeTombstoneState state, boolean inclusive) {
+        table = t;
+        this.state = state;
+        for (int i = t.getPartitionKey().size(); i < t.getPrimaryKey().size(); ++i) {
+          Map<Boolean, PreparedStatement> map = new HashMap<>();
+          map.put(true, prepare(session, t, i, true, inclusive));
+          map.put(false, prepare(session, t, i, false, inclusive));
+          stmts.put(i + 1, map);
+        }
+      }
+
+      private static Statement bind(TableMetadata table, PreparedStatement stmt, Change change, PrimaryKeyValue startVal, ConsistencyLevel cl) {
+        BoundStatement s = stmt.bind();
+        Iterator<ColumnMetadata> keyIt = table.getPrimaryKey().iterator();
+        ColumnMetadata prevCol = keyIt.next();
+        ByteBuffer end = change.row.getBytesUnsafe(prevCol.getName());
+        byte[] start = startVal.values.get(prevCol.getName());
+        while (keyIt.hasNext()) {
+          ColumnMetadata col = keyIt.next();
+          byte[] newStart = startVal.values.get(col.getName());
+          if (newStart == null) {
+            break;
+          }
+          s.setBytesUnsafe(prevCol.getName(), end);
+          end = change.row.getBytesUnsafe(col.getName());
+          prevCol = col;
+          start = newStart;
+        }
+        s.setBytesUnsafe(prevCol.getName() + "_start", ByteBuffer.wrap(start));
+        s.setBytesUnsafe(prevCol.getName() + "_end", end);
+        s.setLong(TIMESTAMP_MARKER_NAME, timeuuidToTimestamp(change.getTime()));
+        s.setConsistencyLevel(cl);
+        s.setIdempotent(true);
+        return s;
+      }
+
+      @Override
+      public Statement getStatement(Change c, ConsistencyLevel cl) {
+        byte[] streamId = new byte[16];
+        c.streamId.duplicate().get(streamId, 0, 16);
+        DeletionStart start = state.getStart(streamId);
+        if (start == null) {
+          throw new IllegalStateException("Got range deletion end but no start in stream " + BaseEncoding.base16().encode(streamId, 0, 16));
+        }
+        try {
+          return bind(table, stmts.get(start.val.values.size()).get(start.inclusive), c, start.val, cl);
+        } finally {
+          state.clear(streamId);
+        }
+      }
+
+    }
+
     private final Session session;
     private final ConsistencyLevel cl;
     private final Map<Byte, Operation> preparedOps = new HashMap<>();
+
+
+    private static class DeletionStart {
+      public final PrimaryKeyValue val;
+      public final boolean inclusive;
+
+      public DeletionStart(PrimaryKeyValue v, boolean i) {
+        val = v;
+        inclusive = i;
+      }
+    }
+
+    private static class PrimaryKeyValue {
+      public final Map<String, byte[]> values = new HashMap<>();
+
+      public PrimaryKeyValue(TableMetadata table, Row row) {
+        for (ColumnMetadata col : table.getPrimaryKey()) {
+          ByteBuffer buf = row.getBytesUnsafe(col.getName());
+          if (buf != null) {
+            byte[] bytes = new byte[buf.remaining()];
+            buf.get(bytes);
+            values.put(col.getName(), bytes);
+          }
+        }
+      }
+
+    }
+
+    private static class RangeTombstoneState {
+
+      private static class Key {
+        public final byte[] val;
+
+        public Key(byte[] v) {
+          val = v;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+          return o instanceof Key && Arrays.equals(val, ((Key)o).val);
+        }
+
+        @Override
+        public int hashCode() {
+          return Arrays.hashCode(val);
+        }
+      }
+
+      private final TableMetadata table;
+      private final ConcurrentHashMap<Key, DeletionStart> state = new ConcurrentHashMap<>();
+
+      public RangeTombstoneState(TableMetadata table) {
+        this.table = table;
+      }
+
+      public void addStart(Change c, boolean inclusive) {
+        byte[] bytes = new byte[16];
+        c.streamId.duplicate().get(bytes, 0, 16);
+        state.put(new Key(bytes), new DeletionStart(new PrimaryKeyValue(table, c.row), inclusive));
+      }
+
+      public DeletionStart getStart(byte[] streamId) {
+        return state.get(new Key(streamId));
+      }
+
+      public void clear(byte[] streamId) {
+        state.remove(new Key(streamId));
+      }
+    }
 
     public Consumer(Cluster c, Session s, String keyspace, String table, ConsistencyLevel cl) {
       session = s;
@@ -307,6 +476,11 @@ public class Main {
       preparedOps.put((byte) 2, new InsertOp(s, tableMetadata));
       preparedOps.put((byte) 3, new RowDeleteOp(s, tableMetadata));
       preparedOps.put((byte) 4, new PartitionDeleteOp(s, tableMetadata));
+      RangeTombstoneState rtState = new RangeTombstoneState(tableMetadata);
+      preparedOps.put((byte) 5, new RangeDeleteStartOp(rtState, true));
+      preparedOps.put((byte) 6, new RangeDeleteStartOp(rtState, false));
+      preparedOps.put((byte) 7, new RangeDeleteEndOp(s, tableMetadata, rtState, true));
+      preparedOps.put((byte) 8, new RangeDeleteEndOp(s, tableMetadata, rtState, false));
     }
 
     private static boolean hasCollection(TableMetadata t) {
@@ -315,7 +489,16 @@ public class Main {
 
     @Override
     public CompletableFuture<Void> consume(Change change) {
-      return FutureUtils.convert(session.executeAsync(preparedOps.get(change.getOperation()).getStatement(change, cl)));
+      Operation op = preparedOps.get(change.getOperation());
+      if (op == null) {
+        System.err.println("Unsupported operation: " + change.getOperation());
+        throw new UnsupportedOperationException("" + change.getOperation());
+      }
+      Statement stmt = op.getStatement(change, cl);
+      if (stmt == null) {
+        return FutureUtils.completed(null);
+      }
+      return FutureUtils.convert(session.executeAsync(stmt));
     }
 
   }
