@@ -14,6 +14,7 @@ import static com.datastax.driver.core.querybuilder.QueryBuilder.timestamp;
 import static com.datastax.driver.core.querybuilder.QueryBuilder.ttl;
 
 import java.nio.ByteBuffer;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -22,10 +23,12 @@ import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
 import com.datastax.driver.core.BoundStatement;
@@ -37,6 +40,7 @@ import com.datastax.driver.core.ConsistencyLevel;
 import com.datastax.driver.core.DataType;
 import com.datastax.driver.core.PreparedStatement;
 import com.datastax.driver.core.RegularStatement;
+import com.datastax.driver.core.ResultSet;
 import com.datastax.driver.core.Row;
 import com.datastax.driver.core.Session;
 import com.datastax.driver.core.Statement;
@@ -46,6 +50,7 @@ import com.datastax.driver.core.querybuilder.Assignment;
 import com.datastax.driver.core.querybuilder.Delete;
 import com.datastax.driver.core.querybuilder.Insert;
 import com.datastax.driver.core.querybuilder.ListSetIdxTimeUUIDAssignment;
+import com.datastax.driver.core.querybuilder.Select;
 import com.datastax.driver.core.querybuilder.QueryBuilder;
 import com.datastax.driver.core.querybuilder.Update;
 import com.google.common.io.BaseEncoding;
@@ -62,13 +67,38 @@ import net.sourceforge.argparse4j.inf.Namespace;
 import sun.misc.Signal;
 
 public class Main {
+  private static enum Mode {
+    DELTA, PREIMAGE, POSTIMAGE;
+
+    public static Mode fromString(String mode) {
+      if ("delta".equals(mode)) {
+         return DELTA;
+      } else if ("preimage".equals(mode)) {
+         return PREIMAGE;
+      } else if ("postimage".equals(mode)) {
+         return POSTIMAGE;
+      } else {
+        throw new IllegalStateException("Wrong mode " + mode);
+      }
+    }
+  }
 
   private static final class Consumer implements ChangeConsumer {
     private static final String TIMESTAMP_MARKER_NAME = "using_timestamp_bind_marker";
     private static final String TTL_MARKER_NAME = "using_ttl_bind_marker";
 
+    private final Session session;
+    private final ConsistencyLevel cl;
+    private final TableMetadata table;
+    private final Map<Byte, Operation> preparedOps = new HashMap<>();
+    private final PreparedStatement preimageQuery;
+
+    private final Mode mode;
+    private final ConcurrentHashMap<ByteBuffer, Operation> nextPostimageOperation = new ConcurrentHashMap<>();
+
     private static interface Operation {
       Statement getStatement(Change c, ConsistencyLevel cl);
+      Statement getStatement(Change c, ConsistencyLevel cl, Mode m);
     }
 
     private static long timeuuidToTimestamp(UUID from) {
@@ -87,9 +117,13 @@ public class Main {
       }
 
       public Statement getStatement(Change c, ConsistencyLevel cl) {
+          return getStatement(c, cl, Mode.DELTA);
+      }
+
+      public Statement getStatement(Change c, ConsistencyLevel cl, Mode m) {
         BoundStatement stmt = preparedStmt.bind();
         stmt.setLong(TIMESTAMP_MARKER_NAME, timeuuidToTimestamp(c.getTime()));
-        bindInternal(stmt, c);
+        bindInternal(stmt, c, m);
         stmt.setConsistencyLevel(cl);
         stmt.setIdempotent(true);
         return stmt;
@@ -104,13 +138,37 @@ public class Main {
         }
       }
 
-      protected void bindAllNonCDCColumns(BoundStatement stmt, Change c) {
+      protected void bindAllNonCDCColumns(BoundStatement stmt, Change c, Mode m) {
         for (Definition d : c.row.getColumnDefinitions()) {
           if (!d.getName().startsWith("cdc$")) {
             if (c.row.isNull(d.getName()) && !c.isDeleted(d.getName())) {
               stmt.unset(d.getName());
             } else {
-              stmt.setBytesUnsafe(d.getName(), c.row.getBytesUnsafe(d.getName()));
+              switch (m) {
+                case DELTA:
+                case POSTIMAGE:
+                  ColumnMetadata meta = table.getColumn(d.getName());
+                  if (meta.getType().getName() == DataType.Name.LIST && !meta.getType().isFrozen()) {
+                    DataType innerType = meta.getType().getTypeArguments().get(0);
+                    TypeToken<Object> type = CodecRegistry.DEFAULT_INSTANCE.codecFor(innerType).getJavaType();
+                    TreeMap<UUID, Object> sorted = new TreeMap<>();
+                    for (Entry<UUID, Object> e : c.row.getMap(d.getName(), TypeToken.of(UUID.class), type).entrySet()) {
+                        sorted.put(e.getKey(), e.getValue());
+                    }
+                    List<Object> list = new ArrayList<>();
+                    for (Entry<UUID, Object> e : sorted.entrySet()) {
+                        list.add(e.getValue());
+                    }
+                    stmt.setList(d.getName(), list);
+                  } else {
+                    stmt.setBytesUnsafe(d.getName(), c.row.getBytesUnsafe(d.getName()));
+                  }
+                  break;
+                case PREIMAGE:
+                  throw new UnsupportedOperationException("Mode not supported " + m);
+                default:
+                  throw new IllegalStateException("Unknown mode " + m);
+              }
             }
           }
         }
@@ -140,7 +198,7 @@ public class Main {
         }
       }
 
-      protected abstract void bindInternal(BoundStatement stmt, Change c);
+      protected abstract void bindInternal(BoundStatement stmt, Change c, Mode m);
     }
 
     private static class UnpreparedUpdateOp implements Operation {
@@ -150,8 +208,12 @@ public class Main {
         table = t;
       }
 
+      public Statement getStatement(Change c, ConsistencyLevel cl) {
+          return getStatement(c, cl, Mode.DELTA);
+      }
+
       @Override
-      public Statement getStatement(Change change, ConsistencyLevel cl) {
+      public Statement getStatement(Change change, ConsistencyLevel cl, Mode m) {
         Update builder = QueryBuilder.update(table);
         Set<ColumnMetadata> primaryColumns = new HashSet<>(table.getPrimaryKey());
         table.getColumns().stream().forEach(c -> {
@@ -236,9 +298,9 @@ public class Main {
       }
 
       @Override
-      protected void bindInternal(BoundStatement stmt, Change c) {
+      protected void bindInternal(BoundStatement stmt, Change c, Mode m) {
         bindTTL(stmt, c);
-        bindAllNonCDCColumns(stmt, c);
+        bindAllNonCDCColumns(stmt, c, m);
       }
 
     }
@@ -257,9 +319,9 @@ public class Main {
       }
 
       @Override
-      protected void bindInternal(BoundStatement stmt, Change c) {
+      protected void bindInternal(BoundStatement stmt, Change c, Mode m) {
         bindTTL(stmt, c);
-        bindAllNonCDCColumns(stmt, c);
+        bindAllNonCDCColumns(stmt, c, m);
       }
 
     }
@@ -278,7 +340,7 @@ public class Main {
       }
 
       @Override
-      protected void bindInternal(BoundStatement stmt, Change c) {
+      protected void bindInternal(BoundStatement stmt, Change c, Mode m) {
         bindPrimaryKeyColumns(stmt, c);
       }
 
@@ -298,7 +360,7 @@ public class Main {
       }
 
       @Override
-      protected void bindInternal(BoundStatement stmt, Change c) {
+      protected void bindInternal(BoundStatement stmt, Change c, Mode m) {
         bindPartitionKeyColumns(stmt, c);
       }
 
@@ -313,8 +375,12 @@ public class Main {
         this.inclusive = inclusive;
       }
 
-      @Override
       public Statement getStatement(Change c, ConsistencyLevel cl) {
+          return getStatement(c, cl, Mode.DELTA);
+      }
+
+      @Override
+      public Statement getStatement(Change c, ConsistencyLevel cl, Mode m) {
         state.addStart(c, inclusive);
         return null;
       }
@@ -376,8 +442,12 @@ public class Main {
         return s;
       }
 
-      @Override
       public Statement getStatement(Change c, ConsistencyLevel cl) {
+          return getStatement(c, cl, Mode.DELTA);
+      }
+
+      @Override
+      public Statement getStatement(Change c, ConsistencyLevel cl, Mode m) {
         byte[] streamId = new byte[16];
         c.streamId.duplicate().get(streamId, 0, 16);
         DeletionStart start = state.getStart(streamId);
@@ -392,11 +462,6 @@ public class Main {
       }
 
     }
-
-    private final Session session;
-    private final ConsistencyLevel cl;
-    private final Map<Byte, Operation> preparedOps = new HashMap<>();
-
 
     private static class DeletionStart {
       public final PrimaryKeyValue val;
@@ -466,30 +531,39 @@ public class Main {
       }
     }
 
-    public Consumer(Cluster c, Session s, String keyspace, String table, ConsistencyLevel cl) {
+    private static PreparedStatement createPreimageQuery(Session s, TableMetadata t) {
+      Select builder = QueryBuilder.select().all().from(t);
+      t.getPrimaryKey().stream().forEach(c -> builder.where(eq(c.getName(), bindMarker(c.getName()))));
+      System.out.println("Preimage query: " + builder);
+      return s.prepare(builder);
+    }
+
+    public Consumer(Mode m, Cluster c, Session s, String keyspace, String tableName, ConsistencyLevel cl) {
+      mode = m;
       session = s;
       this.cl = cl;
-      TableMetadata tableMetadata = c.getMetadata().getKeyspaces().stream().filter(k -> k.getName().equals(keyspace))
-          .findAny().get().getTable(table);
+      table = c.getMetadata().getKeyspaces().stream().filter(k -> k.getName().equals(keyspace))
+          .findAny().get().getTable(tableName);
+      preimageQuery = createPreimageQuery(session, table);
       preparedOps.put((byte) 1,
-          hasCollection(tableMetadata) ? new UnpreparedUpdateOp(tableMetadata) : new UpdateOp(s, tableMetadata));
-      preparedOps.put((byte) 2, new InsertOp(s, tableMetadata));
-      preparedOps.put((byte) 3, new RowDeleteOp(s, tableMetadata));
-      preparedOps.put((byte) 4, new PartitionDeleteOp(s, tableMetadata));
-      RangeTombstoneState rtState = new RangeTombstoneState(tableMetadata);
+          hasCollection(table) ? new UnpreparedUpdateOp(table) : new UpdateOp(s, table));
+      preparedOps.put((byte) 2, new InsertOp(s, table));
+      preparedOps.put((byte) 3, new RowDeleteOp(s, table));
+      preparedOps.put((byte) 4, new PartitionDeleteOp(s, table));
+      RangeTombstoneState rtState = new RangeTombstoneState(table);
       preparedOps.put((byte) 5, new RangeDeleteStartOp(rtState, true));
       preparedOps.put((byte) 6, new RangeDeleteStartOp(rtState, false));
-      preparedOps.put((byte) 7, new RangeDeleteEndOp(s, tableMetadata, rtState, true));
-      preparedOps.put((byte) 8, new RangeDeleteEndOp(s, tableMetadata, rtState, false));
+      preparedOps.put((byte) 7, new RangeDeleteEndOp(s, table, rtState, true));
+      preparedOps.put((byte) 8, new RangeDeleteEndOp(s, table, rtState, false));
     }
 
     private static boolean hasCollection(TableMetadata t) {
       return t.getColumns().stream().anyMatch(c -> c.getType().isCollection() && !c.getType().isFrozen());
     }
 
-    @Override
-    public CompletableFuture<Void> consume(Change change) {
-      Operation op = preparedOps.get(change.getOperation());
+    private CompletableFuture<Void> consumeDelta(Change change) {
+      Byte operationType = change.getOperation();
+      Operation op = preparedOps.get(operationType);
       if (op == null) {
         System.err.println("Unsupported operation: " + change.getOperation());
         throw new UnsupportedOperationException("" + change.getOperation());
@@ -498,12 +572,118 @@ public class Main {
       if (stmt == null) {
         return FutureUtils.completed(null);
       }
-      return FutureUtils.convert(session.executeAsync(stmt));
+      return FutureUtils.convert(session.executeAsync(stmt), "Consume delta " + operationType);
     }
 
+    private CompletableFuture<Void> consumePostimage(Change change) {
+      Byte operationType = change.getOperation();
+      ByteBuffer streamid = change.streamId;
+      if (operationType == 0) {
+        throw new IllegalStateException("Unexpected preimage");
+      } else if (operationType < 3) {
+        nextPostimageOperation.put(streamid, preparedOps.get(operationType));
+        return FutureUtils.completed(null);
+      } else if (operationType < 9) {
+        nextPostimageOperation.remove(streamid);
+        return consumeDelta(change);
+      } else {
+        Operation op = nextPostimageOperation.remove(streamid);
+        if (op != null) {
+          Statement stmt = op.getStatement(change, cl, mode);
+          if (stmt != null) {
+            return FutureUtils.convert(session.executeAsync(stmt), "Consume postimage");
+          }
+        }
+        return FutureUtils.completed(null);
+      }
+    }
+
+    private static String print(ByteBuffer b) {
+      byte[] bytes = new byte[b.remaining()];
+      b.duplicate().get(bytes, 0, bytes.length);
+      return BaseEncoding.base16().encode(bytes, 0, bytes.length);
+    }
+
+    private static boolean equal(ByteBuffer a, ByteBuffer b) {
+        if (a == null && b != null) {
+          return false;
+        }
+        if (a != null && b == null) {
+          return false;
+        }
+        if (a == null && b == null) {
+          return true;
+        }
+        return a.equals(b);
+    }
+
+    private CompletableFuture<Void> checkPreimage(Change c, ResultSet rs) {
+      if (rs.getAvailableWithoutFetching() == 0) {
+        if (rs.isFullyFetched()) {
+          Set<String> primaryColumns = table.getPrimaryKey().stream().map(ColumnMetadata::getName)
+              .collect(Collectors.toSet());
+          for (Definition d : c.row.getColumnDefinitions()) {
+            if (!d.getName().startsWith("cdc$") && !primaryColumns.contains(d.getName()) && !c.row.isNull(d.getName())) {
+              System.out.println("Inconsistency detected.\nNo row in target.");
+              return FutureUtils.completed(null);
+            }
+          }
+          return FutureUtils.completed(null);
+        }
+        return FutureUtils.transformDeferred(rs.fetchMoreResults(), r -> checkPreimage(c, r));
+      }
+      Row expectedRow = rs.one();
+      for (Definition d : expectedRow.getColumnDefinitions()) {
+        try {
+          ByteBuffer expectedColumn = expectedRow.getBytesUnsafe(d.getName());
+          ByteBuffer column = c.row.getBytesUnsafe(d.getName());
+          if (!equal(expectedColumn, column)) {
+            System.out.println("Inconsistency detected.\n Wrong values for column "
+                    + d.getName() + " expected " + print(expectedColumn) + " but got " + print(column));
+            break;
+          }
+        } catch (Exception e) {
+          System.out.println("Inconsistency detected.\nException.");
+          e.printStackTrace();
+          break;
+        }
+      }
+      return FutureUtils.completed(null);
+    }
+
+    private CompletableFuture<Void> consumePreimage(Change change) {
+      Byte operationType = change.getOperation();
+      if (operationType == 0) {
+        BoundStatement stmt = preimageQuery.bind();
+        Set<String> primaryColumns = table.getPrimaryKey().stream().map(ColumnMetadata::getName)
+            .collect(Collectors.toSet());
+        for (Definition d : change.row.getColumnDefinitions()) {
+          if (primaryColumns.contains(d.getName())) {
+            stmt.setBytesUnsafe(d.getName(), change.row.getBytesUnsafe(d.getName()));
+          }
+        }
+        stmt.setConsistencyLevel(ConsistencyLevel.ALL);
+        stmt.setIdempotent(true);
+        return FutureUtils.transformDeferred(session.executeAsync(stmt), r -> checkPreimage(change, r));
+      } else if (operationType < 9) {
+        return consumeDelta(change);
+      } else {
+        throw new IllegalStateException("Unexpected postimage");
+      }
+    }
+
+    @Override
+    public CompletableFuture<Void> consume(Change change) {
+      switch (mode) {
+        case DELTA: return consumeDelta(change);
+        case POSTIMAGE: return consumePostimage(change);
+        case PREIMAGE: return consumePreimage(change);
+      }
+      throw new IllegalStateException("Unknown mode " + mode);
+    }
   }
 
-  private static void replicateChanges(String source, String destination, String keyspace, String table,
+  private static void replicateChanges(Mode mode, String source, String destination, String keyspace, String table,
       ConsistencyLevel cl) throws InterruptedException, ExecutionException {
     Signal.handle(new Signal("INT"), signal -> System.exit(0));
     try (Cluster sCluster = Cluster.builder().addContactPoint(source).build();
@@ -511,7 +691,7 @@ public class Main {
         Cluster dCluster = Cluster.builder().addContactPoint(destination).build();
         Session dSession = dCluster.connect()) {
 
-      ScyllaCDC cdc = new ScyllaCDC(sSession, keyspace, table, new Consumer(dCluster, dSession, keyspace, table, cl));
+      ScyllaCDC cdc = new ScyllaCDC(sSession, keyspace, table, new Consumer(mode, dCluster, dSession, keyspace, table, cl));
 
       cdc.fetchChanges().get();
     }
@@ -519,6 +699,7 @@ public class Main {
 
   private static Namespace parseArguments(String[] args) {
     ArgumentParser parser = ArgumentParsers.newFor("CDCReplicator").build().defaultHelp(true);
+    parser.addArgument("-m", "--mode").help("Mode of operation. Can be delta, preimage or postimage. Default is delta");
     parser.addArgument("-k", "--keyspace").help("Keyspace name");
     parser.addArgument("-t", "--table").help("Table name");
     parser.addArgument("-s", "--source").help("Address of a node in source cluster");
@@ -537,8 +718,9 @@ public class Main {
 
   public static void main(String[] args) throws Exception {
     Namespace ns = parseArguments(args);
-    replicateChanges(ns.getString("source"), ns.getString("destination"), ns.getString("keyspace"),
-        ns.getString("table"), ConsistencyLevel.valueOf(ns.getString("consistency_level").toUpperCase()));
+    replicateChanges(Mode.fromString(ns.getString("mode")), ns.getString("source"),
+        ns.getString("destination"), ns.getString("keyspace"), ns.getString("table"),
+        ConsistencyLevel.valueOf(ns.getString("consistency_level").toUpperCase()));
   }
 
 }

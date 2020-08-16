@@ -14,6 +14,10 @@ public final class FutureUtils {
   }
 
   public static <T> CompletableFuture<Void> convert(ListenableFuture<T> fut) {
+    return convert(fut, null);
+  }
+
+  public static <T> CompletableFuture<Void> convert(ListenableFuture<T> fut, String errorMsg) {
     CompletableFuture<Void> result = new CompletableFuture<>();
     Futures.addCallback(fut, new FutureCallback<T>() {
 
@@ -24,6 +28,7 @@ public final class FutureUtils {
 
       @Override
       public void onFailure(Throwable t) {
+        System.err.println(errorMsg);
         t.printStackTrace();
         result.completeExceptionally(t);
       }
