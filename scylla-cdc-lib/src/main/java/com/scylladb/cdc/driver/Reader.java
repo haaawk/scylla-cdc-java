@@ -51,11 +51,11 @@ public class Reader<T> {
   }
 
   private CompletableFuture<Void> consumeResults(DeferringConsumer<T> c, ResultSet rs) {
-    if (rs.isExhausted()) {
-      c.finish();
-      return FutureUtils.completed(null);
-    }
     if (rs.getAvailableWithoutFetching() == 0) {
+      if (rs.isFullyFetched()) {
+        c.finish();
+        return FutureUtils.completed(null);
+      }
       return FutureUtils.transformDeferred(rs.fetchMoreResults(), r -> consumeResults(c, r));
     }
 
