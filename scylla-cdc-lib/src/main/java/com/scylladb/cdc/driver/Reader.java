@@ -90,13 +90,13 @@ public class Reader<T> {
   }
 
   public static Reader<Date> createGenerationsTimestampsReader(Session s) {
-    return new Reader<Date>(s, select().column("time").from("system_distributed", "cdc_streams"),
+    return new Reader<Date>(s, select().column("time").from("system_distributed", "cdc_streams_descriptions"),
         r -> r.getTimestamp(0));
   }
 
   public static Reader<Set<ByteBuffer>> createGenerationStreamsReader(Session s) {
     return new Reader<Set<ByteBuffer>>(s,
-        select().column("streams").from("system_distributed", "cdc_streams").where(eq("time", bindMarker())),
+        select().column("streams").from("system_distributed", "cdc_streams_descriptions").where(eq("time", bindMarker())),
         r -> r.getSet(0, ByteBuffer.class));
   }
 
