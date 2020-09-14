@@ -12,6 +12,7 @@ import java.util.Queue;
 import java.util.Set;
 import java.util.SortedSet;
 import java.util.concurrent.CompletableFuture;
+import java.util.function.Function;
 
 import com.datastax.driver.core.PartitioningHelper;
 import com.datastax.driver.core.Token;
@@ -107,8 +108,13 @@ public class Master {
     return worker.fetchChanges(g.metadata, tasks).thenApply(v -> g.metadata.startTimestamp);
   }
 
+  private CompletableFuture<Generation> fetchNextGenerationUntilSuccess(Date previousGenerationTimestamp) {
+    return generationsFetcher.fetchNext(previousGenerationTimestamp).thenApply(CompletableFuture::completedFuture)
+        .exceptionally(t -> fetchNextGenerationUntilSuccess(previousGenerationTimestamp)).thenCompose(Function.identity());
+  }
+
   private CompletableFuture<Void> fetchChangesFromNextGeneration(Date previousGenerationTimestamp) {
-    return generationsFetcher.fetchNext(previousGenerationTimestamp).thenCompose(this::sendTasks)
+    return fetchNextGenerationUntilSuccess(previousGenerationTimestamp).thenCompose(this::sendTasks)
         .thenCompose(this::fetchChangesFromNextGeneration);
   }
 

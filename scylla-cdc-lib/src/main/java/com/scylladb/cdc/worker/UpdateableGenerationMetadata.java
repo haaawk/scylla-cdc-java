@@ -31,7 +31,12 @@ public class UpdateableGenerationMetadata {
         return FutureUtils.completed(metadata.endTimestamp);
       }
       Date time = new Date();
-      refreshFuture = generationEndTimestampFetcher.fetch(metadata.startTimestamp).thenApply(endTimestamp -> {
+      refreshFuture = generationEndTimestampFetcher.fetch(metadata.startTimestamp).handle((endTimestamp, e) -> {
+        if (e != null) {
+          System.err.println("Exception while fetching generation end timestamp: " + e.getMessage());
+          e.printStackTrace(System.err);
+          return metadata.endTimestamp;
+        }
         synchronized(lock) {
           metadata = new GenerationMetadata(time, metadata.startTimestamp, endTimestamp);
           refreshFuture = null;
