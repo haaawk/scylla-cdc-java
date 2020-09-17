@@ -5,19 +5,21 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Date;
-import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Queue;
 import java.util.Set;
 import java.util.SortedSet;
+import java.util.TreeSet;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.Function;
+import java.util.stream.Collectors;
 
 import com.datastax.driver.core.PartitioningHelper;
 import com.datastax.driver.core.Token;
 import com.google.common.flogger.FluentLogger;
 import com.scylladb.cdc.Generation;
+import com.scylladb.cdc.Task;
 import com.scylladb.cdc.driver.ClusterObserver;
 import com.scylladb.cdc.worker.Worker;
 
@@ -51,8 +53,8 @@ public class Master {
     }
   }
 
-  private Queue<Set<ByteBuffer>> splitStreams(Set<ByteBuffer> streamIds, SortedSet<Token> tokens) {
-    Queue<Set<ByteBuffer>> tasks = new ArrayDeque<>();
+  private Queue<Task> splitStreams(Set<ByteBuffer> streamIds, SortedSet<Token> tokens) {
+    Queue<Task> tasks = new ArrayDeque<>();
 
     List<DecoratedKey> decorated = new ArrayList<>(streamIds.size());
     for (ByteBuffer b : streamIds) {
@@ -61,7 +63,7 @@ public class Master {
 
     Collections.sort(decorated);
 
-    Set<ByteBuffer> wraparoundVnode = new HashSet<ByteBuffer>();
+    SortedSet<ByteBuffer> wraparoundVnode = new TreeSet<ByteBuffer>();
 
     Iterator<DecoratedKey> streamsIt = decorated.iterator();
     DecoratedKey s = streamsIt.next();
@@ -75,14 +77,14 @@ public class Master {
     }
 
     while (s != null && tokensIt.hasNext()) {
-      Set<ByteBuffer> vnode = new HashSet<>();
+      SortedSet<ByteBuffer> vnode = new TreeSet<>();
       t = tokensIt.next();
       while (s != null && s.token.compareTo(t) <= 0) {
         vnode.add(s.key);
         s = streamsIt.hasNext() ? streamsIt.next() : null;
       }
       if (!vnode.isEmpty()) {
-        tasks.add(vnode);
+        tasks.add(new Task(vnode));
       }
     }
 
@@ -93,24 +95,32 @@ public class Master {
       }
     }
     if (!wraparoundVnode.isEmpty()) {
-      tasks.add(wraparoundVnode);
+      tasks.add(new Task(wraparoundVnode));
     }
 
     return tasks;
   }
 
   private CompletableFuture<Date> sendTasks(Generation g) {
-    Queue<Set<ByteBuffer>> tasks = splitStreams(g.streamIds, observer.getTokens());
+    Queue<Task> tasks = splitStreams(g.streamIds, observer.getTokens());
     logger.atInfo().log("Sending tasks for generation (%s, %s) to workers - %d streams in %d groups",
         g.metadata.startTimestamp, g.metadata.endTimestamp, g.streamIds.size(), tasks.size());
-    logger.atFinest().log("Streams for generation (%s, %s) are %s",
-        g.metadata.startTimestamp, g.metadata.endTimestamp, g.streamIds);
+    logger.atInfo().log("Streams for generation (%s, %s) are %s", g.metadata.startTimestamp, g.metadata.endTimestamp,
+        g.streamIds);
+    StringBuilder sb = new StringBuilder();
+    for (Task t : tasks) {
+      sb.append("\n").append(t).append(" -> ")
+          .append(t.getStreamIds().stream().map(b -> Task.idToString(b)).collect(Collectors.toList()));
+    }
+    sb.append("\n");
+    logger.atInfo().log("Generation starting at %s has following vnodes: %s", g.metadata.startTimestamp, sb.toString());
     return worker.fetchChanges(g.metadata, tasks).thenApply(v -> g.metadata.startTimestamp);
   }
 
   private CompletableFuture<Generation> fetchNextGenerationUntilSuccess(Date previousGenerationTimestamp) {
     return generationsFetcher.fetchNext(previousGenerationTimestamp).thenApply(CompletableFuture::completedFuture)
-        .exceptionally(t -> fetchNextGenerationUntilSuccess(previousGenerationTimestamp)).thenCompose(Function.identity());
+        .exceptionally(t -> fetchNextGenerationUntilSuccess(previousGenerationTimestamp))
+        .thenCompose(Function.identity());
   }
 
   private CompletableFuture<Void> fetchChangesFromNextGeneration(Date previousGenerationTimestamp) {

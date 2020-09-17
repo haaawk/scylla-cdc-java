@@ -1,11 +1,8 @@
 package com.scylladb.cdc.worker;
 
-import java.nio.ByteBuffer;
 import java.time.Instant;
-import java.util.ArrayList;
 import java.util.Date;
 import java.util.Queue;
-import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
@@ -14,10 +11,10 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import com.datastax.driver.core.utils.UUIDs;
 import com.google.common.flogger.FluentLogger;
-import com.google.common.io.BaseEncoding;
 import com.scylladb.cdc.Change;
 import com.scylladb.cdc.ChangeConsumer;
 import com.scylladb.cdc.GenerationMetadata;
+import com.scylladb.cdc.Task;
 import com.scylladb.cdc.common.FutureUtils;
 import com.scylladb.cdc.driver.ClusterObserver;
 import com.scylladb.cdc.driver.Reader;
@@ -62,7 +59,8 @@ public class Worker {
     @Override
     public void finish() {
       if (!empty) {
-        // There's a race condition here but it's ok - we don't have to store the last time.
+        // There's a race condition here but it's ok - we don't have to store the last
+        // time.
         // We won't be off by more than few ms.
         lastNonEmptySelectTime.set(new Date());
       }
@@ -70,38 +68,45 @@ public class Worker {
 
   }
 
-  private static String streamIdToString(Set<ByteBuffer> task) {
-    if (task.isEmpty()) {
-      return "empty task";
-    }
-    byte[] bytes = new byte[16];
-    task.iterator().next().duplicate().get(bytes, 0, 16);
-    return BaseEncoding.base16().encode(bytes, 0, 16);
-  }
-
-  private CompletableFuture<Void> fetchChangesForTask(UpdateableGenerationMetadata g, Set<ByteBuffer> task, UUID start) {
+  private CompletableFuture<Void> fetchChangesForTask(UpdateableGenerationMetadata g, Task task, UUID start,
+      int retryCount) {
     return g.getEndTimestamp(lastTopologyChangeTime.get(), lastNonEmptySelectTime.get()).thenCompose(endTimestamp -> {
       Date now = Date.from(Instant.now().minusSeconds(LATE_WRITES_WINDOW_SECONDS));
       boolean finished = endTimestamp.isPresent() && !now.before(endTimestamp.get());
       UUID end = UUIDs.endOf((finished ? endTimestamp.get() : now).getTime());
-      logger.atInfo().atMostEvery(10, TimeUnit.SECONDS).log("Fetching changes in %s from window [%s, %s] [%d, %d]", streamIdToString(task), start, end, start.timestamp(), end.timestamp());
-      CompletableFuture<UUID> fut = streamsReader.query(new Consumer(), new ArrayList<>(task), start, end).handle((ignored, e) -> {
-        if (e != null) {
-          System.err.println("Exception while fetching changes. Replicator will retry which can cause more than once delivery: " + e.getMessage());
-          e.printStackTrace(System.err);
-          return start;
+      logger.atInfo().atMostEvery(10, TimeUnit.SECONDS).log("Fetching changes in vnode %s and window [%s(%d), %s(%d)] in generation %s",
+          task, start, start.timestamp(), end, end.timestamp(), g.getStartTimestamp());
+      CompletableFuture<UUID> fut = streamsReader.query(new Consumer(), task.getStreamIds(), start, end)
+          .handle((ignored, e) -> {
+            if (e != null) {
+              logger.atWarning().withCause(e).log(
+                  "Exception while fetching changes in vnode %s and window [%s(%d), %s(%d)] in generation %s. Replicator will retry which can cause more than once delivery. This will be %d retry",
+                  task, start, start.timestamp(), end, end.timestamp(), g.getStartTimestamp(), retryCount + 1);
+              return start;
+            } else {
+              return end;
+            }
+          });
+      return fut.thenComposeAsync(nextStart -> {
+        if (nextStart == end) {
+          logger.atInfo().log("Fetching changes in vnode %s and window [%s(%d), %s(%d)] in generation %s finished successfully after {} retries",
+              task, start, start.timestamp(), end, end.timestamp(), g.getStartTimestamp(), retryCount);
+          if (finished) {
+            logger.atInfo().log("All changes has been fetched in vnode %s in generation %s", task, g.getStartTimestamp());
+            return FutureUtils.completed(null);
+          }
+          return fetchChangesForTask(g, task, nextStart, 0);
         } else {
-          return end;
+          return fetchChangesForTask(g, task, nextStart, retryCount + 1);
         }
-      });
-      return fut.thenComposeAsync(nextStart -> (finished && nextStart == end) ? FutureUtils.completed(null) : fetchChangesForTask(g, task, nextStart), delayingExecutor);
+      }, delayingExecutor);
     });
   }
 
-  public CompletableFuture<Void> fetchChanges(GenerationMetadata g, Queue<Set<ByteBuffer>> tasks) {
+  public CompletableFuture<Void> fetchChanges(GenerationMetadata g, Queue<Task> tasks) {
     UpdateableGenerationMetadata m = new UpdateableGenerationMetadata(g, generationEndTimestampFetcher);
     return CompletableFuture.allOf(
-        tasks.stream().map(t -> fetchChangesForTask(m, t, UUIDs.startOf(0))).toArray(n -> new CompletableFuture[n]));
+        tasks.stream().map(t -> fetchChangesForTask(m, t, UUIDs.startOf(0), 0)).toArray(n -> new CompletableFuture[n]));
   }
 
 }

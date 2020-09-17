@@ -12,6 +12,7 @@ import java.nio.ByteBuffer;
 import java.util.Date;
 import java.util.Iterator;
 import java.util.Set;
+import java.util.TreeSet;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.Function;
 
@@ -97,7 +98,7 @@ public class Reader<T> {
   public static Reader<Set<ByteBuffer>> createGenerationStreamsReader(Session s) {
     return new Reader<Set<ByteBuffer>>(s,
         select().column("streams").from("system_distributed", "cdc_streams_descriptions").where(eq("time", bindMarker())),
-        r -> r.getSet(0, ByteBuffer.class));
+        r -> new TreeSet<ByteBuffer>(r.getSet(0, ByteBuffer.class)));
   }
 
   public static Reader<Change> createStreamsReader(Session s, String keyspaceName, String tableName) {

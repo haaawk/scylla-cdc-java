@@ -12,7 +12,7 @@ public class UpdateableGenerationMetadata {
 
   private final Object lock = new Object();
   private final GenerationEndTimestampFetcher generationEndTimestampFetcher;
-  private GenerationMetadata metadata;
+  private volatile GenerationMetadata metadata;
   private CompletableFuture<Optional<Date>> refreshFuture;
 
   public UpdateableGenerationMetadata(GenerationMetadata m, GenerationEndTimestampFetcher f) {
@@ -21,7 +21,7 @@ public class UpdateableGenerationMetadata {
   }
 
   public CompletableFuture<Optional<Date>> getEndTimestamp(Date lastTopologyChangeTime, Date lastNonEmptySelectTime) {
-    synchronized(lock) {
+    synchronized (lock) {
       if (refreshFuture != null) {
         return refreshFuture;
       }
@@ -37,7 +37,7 @@ public class UpdateableGenerationMetadata {
           e.printStackTrace(System.err);
           return metadata.endTimestamp;
         }
-        synchronized(lock) {
+        synchronized (lock) {
           metadata = new GenerationMetadata(time, metadata.startTimestamp, endTimestamp);
           refreshFuture = null;
         }
@@ -45,6 +45,10 @@ public class UpdateableGenerationMetadata {
       });
       return refreshFuture;
     }
+  }
+
+  public Date getStartTimestamp() {
+    return metadata.startTimestamp;
   }
 
 }
