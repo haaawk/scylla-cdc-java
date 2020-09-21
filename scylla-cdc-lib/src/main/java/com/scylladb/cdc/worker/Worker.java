@@ -7,6 +7,7 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import com.datastax.driver.core.utils.UUIDs;
@@ -50,10 +51,12 @@ public class Worker {
 
   private class Consumer implements Reader.DeferringConsumer<Change> {
     public boolean empty = true;
+    public AtomicInteger count = new AtomicInteger();
 
     @Override
     public CompletableFuture<Void> consume(Change item) {
       empty = false;
+      count.incrementAndGet();
       return consumer.consume(item);
     }
 
@@ -70,7 +73,7 @@ public class Worker {
   }
 
   private CompletableFuture<Void> fetchChangesForTask(UpdateableGenerationMetadata g, Task task, UUID start,
-      int retryCount) {
+      int retryCount, int generationResultsCount) {
     return g.getEndTimestamp(lastTopologyChangeTime.get(), lastNonEmptySelectTime.get()).thenCompose(endTimestamp -> {
       Date now = Date.from(Instant.now().minusSeconds(LATE_WRITES_WINDOW_SECONDS));
       boolean finished = endTimestamp.isPresent() && !now.before(endTimestamp.get());
@@ -91,15 +94,15 @@ public class Worker {
           });
       return fut.thenComposeAsync(nextStart -> {
         if (nextStart == end) {
-          logger.atInfo().log("Fetching changes in vnode %s and window [%s(%d), %s(%d)] in generation %s finished successfully after %d retries",
-              task, start, start.timestamp(), end, end.timestamp(), g.getStartTimestamp(), retryCount);
+          logger.atInfo().log("Fetching changes in vnode %s and window [%s(%d), %s(%d)] in generation %s finished successfully with %d changes after %d retries",
+              task, start, start.timestamp(), end, end.timestamp(), g.getStartTimestamp(), c.count.get(), retryCount);
           if (finished || (Worker.this.finished && c.empty)) {
-            logger.atInfo().log("All changes has been fetched in vnode %s in generation %s", task, g.getStartTimestamp());
+            logger.atInfo().log("All changes has been fetched in vnode %s in generation %s. Total %d changes", task, g.getStartTimestamp(), generationResultsCount + c.count.get());
             return FutureUtils.completed(null);
           }
-          return fetchChangesForTask(g, task, nextStart, 0);
+          return fetchChangesForTask(g, task, nextStart, 0, generationResultsCount + c.count.get());
         } else {
-          return fetchChangesForTask(g, task, nextStart, retryCount + 1);
+          return fetchChangesForTask(g, task, nextStart, retryCount + 1, generationResultsCount);
         }
       }, delayingExecutor);
     });
@@ -108,7 +111,7 @@ public class Worker {
   public CompletableFuture<Void> fetchChanges(GenerationMetadata g, Queue<Task> tasks) {
     UpdateableGenerationMetadata m = new UpdateableGenerationMetadata(g, generationEndTimestampFetcher);
     return CompletableFuture.allOf(
-        tasks.stream().map(t -> fetchChangesForTask(m, t, UUIDs.startOf(0), 0)).toArray(n -> new CompletableFuture[n]));
+        tasks.stream().map(t -> fetchChangesForTask(m, t, UUIDs.startOf(0), 0, 0)).toArray(n -> new CompletableFuture[n]));
   }
 
   public void finish() {
