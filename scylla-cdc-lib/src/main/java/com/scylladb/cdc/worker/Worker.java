@@ -1,5 +1,6 @@
 package com.scylladb.cdc.worker;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.util.Date;
 import java.util.Queue;
@@ -22,8 +23,9 @@ import com.scylladb.cdc.driver.Reader;
 
 public class Worker {
 
-  private final Executor delayingExecutor = new DelayingExecutor(10);
-  private final Executor noResultDelayingExecutor = new DelayingExecutor(30);
+  private final Executor delayingExecutor1s = new DelayingExecutor(1);
+  private final Executor delayingExecutor10s = new DelayingExecutor(10);
+  private final Executor delayingExecutor30s = new DelayingExecutor(30);
 
   private static final FluentLogger logger = FluentLogger.forEnclosingClass();
   private final static int LATE_WRITES_WINDOW_SECONDS = 10;
@@ -78,7 +80,18 @@ public class Worker {
     return g.getEndTimestamp(lastTopologyChangeTime.get(), lastNonEmptySelectTime.get()).thenCompose(endTimestamp -> {
       Date now = Date.from(Instant.now().minusSeconds(LATE_WRITES_WINDOW_SECONDS));
       boolean finished = endTimestamp.isPresent() && !now.before(endTimestamp.get());
-      UUID end = UUIDs.endOf((finished ? endTimestamp.get() : now).getTime());
+      Date startTs = new Date(UUIDs.unixTimestamp(start));
+      Date endTs = finished ? endTimestamp.get() : now;
+      Duration window = Duration.between(startTs.toInstant(), endTs.toInstant());
+      boolean cropped;
+      UUID end;
+      if (window.compareTo(Duration.ofSeconds(30)) > 0) {
+        cropped = true;
+        end = UUIDs.endOf(startTs.toInstant().plusSeconds(30).toEpochMilli());
+      } else {
+        cropped = false;
+        end = UUIDs.endOf(endTs.getTime());
+      }
       logger.atInfo().atMostEvery(10, TimeUnit.SECONDS).log("Fetching changes in vnode %s and window [%s(%d), %s(%d)] in generation %s",
           task, start, start.timestamp(), end, end.timestamp(), g.getStartTimestamp());
       Consumer c = new Consumer();
@@ -105,7 +118,7 @@ public class Worker {
         } else {
           return fetchChangesForTask(g, task, nextStart, retryCount + 1, generationResultsCount);
         }
-      }, c.empty ? noResultDelayingExecutor: delayingExecutor);
+      }, cropped ? delayingExecutor1s : (c.empty ? delayingExecutor30s : delayingExecutor10s));
     });
   }
 
