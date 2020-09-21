@@ -20,6 +20,7 @@ import com.datastax.driver.core.Token;
 import com.google.common.flogger.FluentLogger;
 import com.scylladb.cdc.Generation;
 import com.scylladb.cdc.Task;
+import com.scylladb.cdc.common.FutureUtils;
 import com.scylladb.cdc.driver.ClusterObserver;
 import com.scylladb.cdc.worker.Worker;
 
@@ -30,6 +31,7 @@ public class Master {
   private final Worker worker;
   private final ClusterObserver observer;
   private final PartitioningHelper partitioning;
+  private boolean finished = false;
 
   public Master(GenerationsFetcher f, Worker w, ClusterObserver o, PartitioningHelper p) {
     generationsFetcher = f;
@@ -102,6 +104,9 @@ public class Master {
   }
 
   private CompletableFuture<Date> sendTasks(Generation g) {
+    if (g == null) {
+      return FutureUtils.completed(null);
+    }
     Queue<Task> tasks = splitStreams(g.streamIds, observer.getTokens());
     logger.atInfo().log("Sending tasks for generation (%s, %s) to workers - %d streams in %d groups",
         g.metadata.startTimestamp, g.metadata.endTimestamp, g.streamIds.size(), tasks.size());
@@ -118,17 +123,25 @@ public class Master {
   }
 
   private CompletableFuture<Generation> fetchNextGenerationUntilSuccess(Date previousGenerationTimestamp) {
-    return generationsFetcher.fetchNext(previousGenerationTimestamp).thenApply(CompletableFuture::completedFuture)
+    return generationsFetcher.fetchNext(previousGenerationTimestamp, finished).thenApply(CompletableFuture::completedFuture)
         .exceptionally(t -> fetchNextGenerationUntilSuccess(previousGenerationTimestamp))
         .thenCompose(Function.identity());
   }
 
   private CompletableFuture<Void> fetchChangesFromNextGeneration(Date previousGenerationTimestamp) {
+    if (previousGenerationTimestamp == null) {
+      return FutureUtils.completed(null);
+    }
     return fetchNextGenerationUntilSuccess(previousGenerationTimestamp).thenCompose(this::sendTasks)
         .thenCompose(this::fetchChangesFromNextGeneration);
   }
 
   public CompletableFuture<Void> fetchChanges() {
     return fetchChangesFromNextGeneration(new Date(0));
+  }
+
+  public void finish() {
+    finished = true;
+    worker.finish();
   }
 }

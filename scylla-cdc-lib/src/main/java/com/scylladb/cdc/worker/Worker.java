@@ -31,6 +31,7 @@ public class Worker {
   private final ClusterObserver observer;
   private final AtomicReference<Date> lastTopologyChangeTime = new AtomicReference<>(new Date(0));
   private final AtomicReference<Date> lastNonEmptySelectTime = new AtomicReference<>(new Date(0));
+  private boolean finished = false;
 
   public Worker(ChangeConsumer c, Reader<Change> sr, GenerationEndTimestampFetcher gr, ClusterObserver o) {
     consumer = c;
@@ -48,7 +49,7 @@ public class Worker {
   }
 
   private class Consumer implements Reader.DeferringConsumer<Change> {
-    private boolean empty = true;
+    public boolean empty = true;
 
     @Override
     public CompletableFuture<Void> consume(Change item) {
@@ -76,7 +77,8 @@ public class Worker {
       UUID end = UUIDs.endOf((finished ? endTimestamp.get() : now).getTime());
       logger.atInfo().atMostEvery(10, TimeUnit.SECONDS).log("Fetching changes in vnode %s and window [%s(%d), %s(%d)] in generation %s",
           task, start, start.timestamp(), end, end.timestamp(), g.getStartTimestamp());
-      CompletableFuture<UUID> fut = streamsReader.query(new Consumer(), task.getStreamIds(), start, end)
+      Consumer c = new Consumer();
+      CompletableFuture<UUID> fut = streamsReader.query(c, task.getStreamIds(), start, end)
           .handle((ignored, e) -> {
             if (e != null) {
               logger.atWarning().withCause(e).log(
@@ -91,7 +93,7 @@ public class Worker {
         if (nextStart == end) {
           logger.atInfo().log("Fetching changes in vnode %s and window [%s(%d), %s(%d)] in generation %s finished successfully after {} retries",
               task, start, start.timestamp(), end, end.timestamp(), g.getStartTimestamp(), retryCount);
-          if (finished) {
+          if (finished || (Worker.this.finished && c.empty)) {
             logger.atInfo().log("All changes has been fetched in vnode %s in generation %s", task, g.getStartTimestamp());
             return FutureUtils.completed(null);
           }
@@ -107,6 +109,10 @@ public class Worker {
     UpdateableGenerationMetadata m = new UpdateableGenerationMetadata(g, generationEndTimestampFetcher);
     return CompletableFuture.allOf(
         tasks.stream().map(t -> fetchChangesForTask(m, t, UUIDs.startOf(0), 0)).toArray(n -> new CompletableFuture[n]));
+  }
+
+  public void finish() {
+    finished = true;
   }
 
 }

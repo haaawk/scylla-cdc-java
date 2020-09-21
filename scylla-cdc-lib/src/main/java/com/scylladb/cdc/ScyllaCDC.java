@@ -32,4 +32,8 @@ public class ScyllaCDC {
     return master.fetchChanges();
   }
 
+  public void finish() {
+    master.finish();
+  }
+
 }

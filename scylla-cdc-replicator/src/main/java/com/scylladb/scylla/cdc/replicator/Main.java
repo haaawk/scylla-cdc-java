@@ -684,7 +684,6 @@ public class Main {
 
   private static void replicateChanges(Mode mode, String source, String destination, String keyspace, String table,
       ConsistencyLevel cl) throws InterruptedException, ExecutionException {
-    Signal.handle(new Signal("INT"), signal -> System.exit(0));
     try (Cluster sCluster = Cluster.builder().addContactPoint(source).build();
         Session sSession = sCluster.connect();
         Cluster dCluster = Cluster.builder().addContactPoint(destination).build();
@@ -692,6 +691,7 @@ public class Main {
 
       ScyllaCDC cdc = new ScyllaCDC(sSession, keyspace, table, new Consumer(mode, dCluster, dSession, keyspace, table, cl));
 
+      Signal.handle(new Signal("INT"), signal -> cdc.finish());
       cdc.fetchChanges().get();
     }
   }

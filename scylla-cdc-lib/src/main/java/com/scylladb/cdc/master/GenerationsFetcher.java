@@ -9,6 +9,7 @@ import java.util.concurrent.CompletableFuture;
 
 import com.scylladb.cdc.Generation;
 import com.scylladb.cdc.GenerationMetadata;
+import com.scylladb.cdc.common.FutureUtils;
 import com.scylladb.cdc.driver.Reader;
 
 public class GenerationsFetcher {
@@ -69,11 +70,18 @@ public class GenerationsFetcher {
 
   }
 
-  public CompletableFuture<Generation> fetchNext(Date lowerBound) {
+  public CompletableFuture<Generation> fetchNext(Date lowerBound, boolean finished) {
     Date fetchTime = new Date();
     return timestampsReader.query(new Consumer(fetchTime, lowerBound)).thenCompose(metadata -> {
-      if (!metadata.isPresent() || metadata.get().startTimestamp.after(Date.from(Instant.now().minusSeconds(30)))) {
-        return fetchNext(lowerBound);
+      if (!metadata.isPresent()) {
+        if (finished) {
+          return FutureUtils.completed(null);
+        } else {
+          return fetchNext(lowerBound, finished);
+        }
+      }
+      if (metadata.get().startTimestamp.after(Date.from(Instant.now().minusSeconds(30)))) {
+        return fetchNext(lowerBound, finished);
       }
       return streamsReader.query(new StreamsConsumer(), metadata.get().startTimestamp)
           .thenApply(streams -> new Generation(metadata.get(), streams));
