@@ -12,6 +12,7 @@ import java.util.Set;
 import java.util.SortedSet;
 import java.util.TreeSet;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
@@ -31,7 +32,7 @@ public class Master {
   private final Worker worker;
   private final ClusterObserver observer;
   private final PartitioningHelper partitioning;
-  private boolean finished = false;
+  private AtomicBoolean finished = new AtomicBoolean();
 
   public Master(GenerationsFetcher f, Worker w, ClusterObserver o, PartitioningHelper p) {
     generationsFetcher = f;
@@ -141,7 +142,7 @@ public class Master {
   }
 
   public void finish() {
-    finished = true;
+    finished.set(true);;
     worker.finish();
   }
 }

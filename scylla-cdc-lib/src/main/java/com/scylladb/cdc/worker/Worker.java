@@ -22,7 +22,8 @@ import com.scylladb.cdc.driver.Reader;
 
 public class Worker {
 
-  private final Executor delayingExecutor = new DelayingExecutor();
+  private final Executor delayingExecutor = new DelayingExecutor(10);
+  private final Executor noResultDelayingExecutor = new DelayingExecutor(30);
 
   private static final FluentLogger logger = FluentLogger.forEnclosingClass();
   private final static int LATE_WRITES_WINDOW_SECONDS = 10;
@@ -104,7 +105,7 @@ public class Worker {
         } else {
           return fetchChangesForTask(g, task, nextStart, retryCount + 1, generationResultsCount);
         }
-      }, delayingExecutor);
+      }, c.empty ? noResultDelayingExecutor: delayingExecutor);
     });
   }
 

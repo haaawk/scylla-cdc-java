@@ -8,6 +8,7 @@ import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 
 final class DelayingExecutor implements Executor {
+  private final long delaySeconds;
   private final ScheduledExecutorService internalExecutor =
       Executors.newSingleThreadScheduledExecutor(new ThreadFactory() {
         @Override
@@ -19,8 +20,12 @@ final class DelayingExecutor implements Executor {
         }
       });
 
+  public DelayingExecutor(long delaySecods) {
+    this.delaySeconds = delaySecods;
+  }
+
   public void execute(Runnable r) {
-    internalExecutor.schedule(() -> ForkJoinPool.commonPool().execute(r), 1L, TimeUnit.SECONDS);
+    internalExecutor.schedule(() -> ForkJoinPool.commonPool().execute(r), delaySeconds, TimeUnit.SECONDS);
   }
 
 }

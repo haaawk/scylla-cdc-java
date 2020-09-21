@@ -6,6 +6,7 @@ import java.util.Date;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import com.scylladb.cdc.Generation;
 import com.scylladb.cdc.GenerationMetadata;
@@ -70,11 +71,11 @@ public class GenerationsFetcher {
 
   }
 
-  public CompletableFuture<Generation> fetchNext(Date lowerBound, boolean finished) {
+  public CompletableFuture<Generation> fetchNext(Date lowerBound, AtomicBoolean finished) {
     Date fetchTime = new Date();
     return timestampsReader.query(new Consumer(fetchTime, lowerBound)).thenCompose(metadata -> {
       if (!metadata.isPresent()) {
-        if (finished) {
+        if (finished.get()) {
           return FutureUtils.completed(null);
         } else {
           return fetchNext(lowerBound, finished);
