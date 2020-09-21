@@ -91,7 +91,7 @@ public class Worker {
           });
       return fut.thenComposeAsync(nextStart -> {
         if (nextStart == end) {
-          logger.atInfo().log("Fetching changes in vnode %s and window [%s(%d), %s(%d)] in generation %s finished successfully after {} retries",
+          logger.atInfo().log("Fetching changes in vnode %s and window [%s(%d), %s(%d)] in generation %s finished successfully after %d retries",
               task, start, start.timestamp(), end, end.timestamp(), g.getStartTimestamp(), retryCount);
           if (finished || (Worker.this.finished && c.empty)) {
             logger.atInfo().log("All changes has been fetched in vnode %s in generation %s", task, g.getStartTimestamp());

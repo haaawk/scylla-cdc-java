@@ -111,7 +111,7 @@ public class Master {
     logger.atInfo().log("Sending tasks for generation (%s, %s) to workers - %d streams in %d groups",
         g.metadata.startTimestamp, g.metadata.endTimestamp, g.streamIds.size(), tasks.size());
     logger.atInfo().log("Streams for generation (%s, %s) are %s", g.metadata.startTimestamp, g.metadata.endTimestamp,
-        g.streamIds);
+        g.streamIds.stream().map(b -> Task.idToString(b)).collect(Collectors.toSet()));
     StringBuilder sb = new StringBuilder();
     for (Task t : tasks) {
       sb.append("\n").append(t).append(" -> ")
