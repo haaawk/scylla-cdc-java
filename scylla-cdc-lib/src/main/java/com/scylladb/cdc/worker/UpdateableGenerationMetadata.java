@@ -14,6 +14,7 @@ public class UpdateableGenerationMetadata {
   private final GenerationEndTimestampFetcher generationEndTimestampFetcher;
   private volatile GenerationMetadata metadata;
   private CompletableFuture<Optional<Date>> refreshFuture;
+  private boolean running = false;
 
   public UpdateableGenerationMetadata(GenerationMetadata m, GenerationEndTimestampFetcher f) {
     generationEndTimestampFetcher = f;
@@ -22,7 +23,7 @@ public class UpdateableGenerationMetadata {
 
   public CompletableFuture<Optional<Date>> getEndTimestamp(Date lastTopologyChangeTime, Date lastNonEmptySelectTime) {
     synchronized (lock) {
-      if (refreshFuture != null) {
+      if (running) {
         return refreshFuture;
       }
       Date nowMinus10s = Date.from(Instant.now().minusSeconds(10));
@@ -31,6 +32,7 @@ public class UpdateableGenerationMetadata {
         return FutureUtils.completed(metadata.endTimestamp);
       }
       Date time = new Date();
+      running = true;
       refreshFuture = generationEndTimestampFetcher.fetch(metadata.startTimestamp).handle((endTimestamp, e) -> {
         if (e != null) {
           System.err.println("Exception while fetching generation end timestamp: " + e.getMessage());
@@ -39,7 +41,7 @@ public class UpdateableGenerationMetadata {
         }
         synchronized (lock) {
           metadata = new GenerationMetadata(time, metadata.startTimestamp, endTimestamp);
-          refreshFuture = null;
+          running = false;
         }
         return endTimestamp;
       });
