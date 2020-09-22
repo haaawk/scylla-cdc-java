@@ -98,7 +98,6 @@ public class UpdateableGenerationMetadataTest {
     verifyNoMoreInteractions(fetcher);
 
     assertFalse(fut2.isDone());
-    assertEquals(fut1, fut2);
 
     fetchFut.complete(newEndTs);
 

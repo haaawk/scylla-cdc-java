@@ -9,48 +9,56 @@ import com.scylladb.cdc.GenerationMetadata;
 import com.scylladb.cdc.common.FutureUtils;
 
 public class UpdateableGenerationMetadata {
-
-  private final Object lock = new Object();
   private final GenerationEndTimestampFetcher generationEndTimestampFetcher;
-  private volatile GenerationMetadata metadata;
-  private CompletableFuture<Optional<Date>> refreshFuture;
-  private boolean running = false;
+  private final GenerationMetadata metadata;
+
+  private class FetchEndTimestampResult {
+    public FetchEndTimestampResult(Optional<Date> endTimestamp, Date fetchTime) {
+      this.endTimestamp = endTimestamp;
+      this.fetchTime = fetchTime;
+    }
+
+    public Optional<Date> endTimestamp;
+    public Date fetchTime;
+  }
+
+  private volatile CompletableFuture<FetchEndTimestampResult> refreshFuture;
+
+  private CompletableFuture<FetchEndTimestampResult> refresh(Date prevFetchTime) {
+    Date newFetchTime = new Date();
+    return generationEndTimestampFetcher.fetch(metadata.startTimestamp).handle((t, e) -> {
+      if (e == null) {
+        return new FetchEndTimestampResult(t, newFetchTime);
+      }
+
+      System.err.println("Exception while fetching generation end timestamp: " + e.getMessage());
+      e.printStackTrace(System.err);
+      return new FetchEndTimestampResult(metadata.endTimestamp, prevFetchTime);
+    });
+  }
 
   public UpdateableGenerationMetadata(GenerationMetadata m, GenerationEndTimestampFetcher f) {
     generationEndTimestampFetcher = f;
     metadata = m;
+    refreshFuture = FutureUtils.completed(new FetchEndTimestampResult(m.endTimestamp, m.fetchTime));
   }
 
   public CompletableFuture<Optional<Date>> getEndTimestamp(Date lastTopologyChangeTime, Date lastNonEmptySelectTime) {
-    synchronized (lock) {
-      if (running) {
-        return refreshFuture;
+    return refreshFuture.thenCompose(refreshResult -> {
+      Date nowMinus10s = Date.from(Instant.now().minusSeconds(10)); // FIXME: magic constant
+      if (refreshResult.endTimestamp.isPresent()
+          || !(refreshResult.fetchTime.before(lastTopologyChangeTime) || lastNonEmptySelectTime.before(nowMinus10s))) {
+        return FutureUtils.completed(refreshResult.endTimestamp);
       }
-      Date nowMinus10s = Date.from(Instant.now().minusSeconds(10));
-      if (metadata.endTimestamp.isPresent()
-          || !(metadata.fetchTime.before(lastTopologyChangeTime) || lastNonEmptySelectTime.before(nowMinus10s))) {
-        return FutureUtils.completed(metadata.endTimestamp);
-      }
-      Date time = new Date();
-      running = true;
-      refreshFuture = generationEndTimestampFetcher.fetch(metadata.startTimestamp).handle((endTimestamp, e) -> {
-        if (e != null) {
-          System.err.println("Exception while fetching generation end timestamp: " + e.getMessage());
-          e.printStackTrace(System.err);
-          return metadata.endTimestamp;
-        }
-        synchronized (lock) {
-          metadata = new GenerationMetadata(time, metadata.startTimestamp, endTimestamp);
-          running = false;
-        }
-        return endTimestamp;
+
+      refreshFuture = refresh(refreshResult.fetchTime);
+      return refreshFuture.thenCompose(r -> {
+          return FutureUtils.completed(r.endTimestamp);
       });
-      return refreshFuture;
-    }
+    });
   }
 
   public Date getStartTimestamp() {
     return metadata.startTimestamp;
   }
-
 }
