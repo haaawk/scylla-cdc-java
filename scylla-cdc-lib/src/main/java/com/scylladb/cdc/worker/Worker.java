@@ -1,8 +1,7 @@
 package com.scylladb.cdc.worker;
 
-import java.time.Duration;
-import java.time.Instant;
 import java.util.Date;
+import java.util.Optional;
 import java.util.Queue;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
@@ -20,6 +19,8 @@ import com.scylladb.cdc.Task;
 import com.scylladb.cdc.common.FutureUtils;
 import com.scylladb.cdc.driver.ClusterObserver;
 import com.scylladb.cdc.driver.Reader;
+import com.scylladb.cdc.worker.fetchingwindow.FetchingWindow;
+import com.scylladb.cdc.worker.fetchingwindow.FetchingWindowFactory;
 
 public class Worker {
 
@@ -28,7 +29,6 @@ public class Worker {
   private final Executor delayingExecutor30s = new DelayingExecutor(30);
 
   private static final FluentLogger logger = FluentLogger.forEnclosingClass();
-  private final static int LATE_WRITES_WINDOW_SECONDS = 10;
   private final ChangeConsumer consumer;
   private final Reader<Change> streamsReader;
   private final GenerationEndTimestampFetcher generationEndTimestampFetcher;
@@ -78,54 +78,49 @@ public class Worker {
   private CompletableFuture<Void> fetchChangesForTask(UpdateableGenerationMetadata g, Task task, UUID start,
       int retryCount, int generationResultsCount) {
     return g.getEndTimestamp(lastTopologyChangeTime.get(), lastNonEmptySelectTime.get()).thenCompose(endTimestamp -> {
-      Date now = Date.from(Instant.now().minusSeconds(LATE_WRITES_WINDOW_SECONDS));
-      boolean finished = endTimestamp.isPresent() && !now.before(endTimestamp.get());
-      Date startTs = new Date(UUIDs.unixTimestamp(start));
-      Date endTs = finished ? endTimestamp.get() : now;
-      Duration window = Duration.between(startTs.toInstant(), endTs.toInstant());
-      boolean cropped;
-      UUID end;
-      if (window.compareTo(Duration.ofSeconds(30)) > 0) {
-        cropped = true;
-        end = UUIDs.endOf(startTs.toInstant().plusSeconds(30).toEpochMilli());
-      } else {
-        cropped = false;
-        end = UUIDs.endOf(endTs.getTime());
+      Optional<FetchingWindow> windowOpt = FetchingWindowFactory.computeFetchingWindow(start, endTimestamp);
+      if (!windowOpt.isPresent()) {
+        // start is inside late writes window so we need to wait a bit and retry
+        return FutureUtils.completed(null).thenComposeAsync(
+            ignored -> fetchChangesForTask(g, task, start, retryCount, generationResultsCount), delayingExecutor30s);
       }
-      logger.atInfo().atMostEvery(10, TimeUnit.SECONDS).log("Fetching changes in vnode %s and window [%s(%d), %s(%d)] in generation %s",
-          task, start, start.timestamp(), end, end.timestamp(), g.getStartTimestamp());
+      FetchingWindow window = windowOpt.get();
+      logger.atInfo().atMostEvery(10, TimeUnit.SECONDS)
+          .log("Fetching changes in vnode %s and window %s in generation %s", task, window, g.getStartTimestamp());
       Consumer c = new Consumer();
-      CompletableFuture<UUID> fut = streamsReader.query(c, task.getStreamIds(), start, end)
+      CompletableFuture<UUID> fut = streamsReader.query(c, task.getStreamIds(), window.start(), window.end())
           .handle((ignored, e) -> {
             if (e != null) {
               logger.atWarning().withCause(e).log(
-                  "Exception while fetching changes in vnode %s and window [%s(%d), %s(%d)] in generation %s. Replicator will retry which can cause more than once delivery. This will be %d retry",
-                  task, start, start.timestamp(), end, end.timestamp(), g.getStartTimestamp(), retryCount + 1);
+                  "Exception while fetching changes in vnode %s and window %s in generation %s. Replicator will retry which can cause more than once delivery. This will be %d retry",
+                  task, window, g.getStartTimestamp(), retryCount + 1);
               return start;
             } else {
-              return end;
+              return window.end();
             }
           });
       return fut.thenComposeAsync(nextStart -> {
-        if (nextStart == end) {
-          logger.atInfo().log("Fetching changes in vnode %s and window [%s(%d), %s(%d)] in generation %s finished successfully with %d changes after %d retries",
-              task, start, start.timestamp(), end, end.timestamp(), g.getStartTimestamp(), c.count.get(), retryCount);
-          if (finished || (Worker.this.finished && c.empty)) {
-            logger.atInfo().log("All changes has been fetched in vnode %s in generation %s. Total %d changes", task, g.getStartTimestamp(), generationResultsCount + c.count.get());
+        if (nextStart == window.end()) {
+          logger.atInfo().log(
+              "Fetching changes in vnode %s and window %s in generation %s finished successfully with %d changes after %d retries",
+              task, window, g.getStartTimestamp(), c.count.get(), retryCount);
+          if (window.isLast() || (Worker.this.finished && c.empty)) {
+            logger.atInfo().log("All changes has been fetched in vnode %s in generation %s. Total %d changes", task,
+                g.getStartTimestamp(), generationResultsCount + c.count.get());
             return FutureUtils.completed(null);
           }
           return fetchChangesForTask(g, task, nextStart, 0, generationResultsCount + c.count.get());
         } else {
           return fetchChangesForTask(g, task, nextStart, retryCount + 1, generationResultsCount);
         }
-      }, cropped ? delayingExecutor1s : (c.empty ? delayingExecutor30s : delayingExecutor10s));
+      }, window.wasCropped() ? delayingExecutor1s : (c.empty ? delayingExecutor30s : delayingExecutor10s));
     });
   }
 
   public CompletableFuture<Void> fetchChanges(GenerationMetadata g, Queue<Task> tasks) {
     UpdateableGenerationMetadata m = new UpdateableGenerationMetadata(g, generationEndTimestampFetcher);
-    return CompletableFuture.allOf(
-        tasks.stream().map(t -> fetchChangesForTask(m, t, UUIDs.startOf(0), 0, 0)).toArray(n -> new CompletableFuture[n]));
+    return CompletableFuture.allOf(tasks.stream().map(t -> fetchChangesForTask(m, t, UUIDs.startOf(0), 0, 0))
+        .toArray(n -> new CompletableFuture[n]));
   }
 
   public void finish() {

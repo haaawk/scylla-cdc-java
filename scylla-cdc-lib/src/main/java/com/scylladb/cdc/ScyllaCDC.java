@@ -24,8 +24,9 @@ public class ScyllaCDC {
     GenerationsFetcher fetcher = new GenerationsFetcher(tReader, gsReader);
     GenerationEndTimestampFetcher endTimestampFetcher = new GenerationEndTimestampFetcher(tReader);
     ClusterObserver observer = new ClusterObserver(session.getCluster());
-    master = new Master(fetcher, new Worker(c, Reader.createStreamsReader(session, keyspace, table), endTimestampFetcher,
-        observer), observer, new PartitioningHelper(session.getCluster()));
+    master = new Master(fetcher, new Worker(c, Reader.createStreamsReader(session, keyspace, table),
+        endTimestampFetcher, observer), observer,
+        new PartitioningHelper(session.getCluster()));
   }
 
   public CompletableFuture<Void> fetchChanges() {
