@@ -9,6 +9,7 @@ import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.stream.Collectors;
 
 import com.datastax.driver.core.utils.UUIDs;
 import com.google.common.flogger.FluentLogger;
@@ -88,7 +89,8 @@ public class Worker {
       logger.atInfo().atMostEvery(10, TimeUnit.SECONDS)
           .log("Fetching changes in vnode %s and window %s in generation %s", task, window, g.getStartTimestamp());
       Consumer c = new Consumer();
-      CompletableFuture<UUID> fut = streamsReader.query(c, task.getStreamIds(), window.start(), window.end())
+      CompletableFuture<UUID> fut = streamsReader.query(c,
+          task.getStreamIds().stream().map(id -> id.bytes).collect(Collectors.toList()), window.start(), window.end())
           .handle((ignored, e) -> {
             if (e != null) {
               logger.atWarning().withCause(e).log(

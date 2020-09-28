@@ -14,7 +14,6 @@ import java.util.TreeSet;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Function;
-import java.util.stream.Collectors;
 
 import com.datastax.driver.core.PartitioningHelper;
 import com.datastax.driver.core.Token;
@@ -22,6 +21,7 @@ import com.google.common.flogger.FluentLogger;
 import com.scylladb.cdc.Generation;
 import com.scylladb.cdc.Task;
 import com.scylladb.cdc.common.FutureUtils;
+import com.scylladb.cdc.common.StreamId;
 import com.scylladb.cdc.driver.ClusterObserver;
 import com.scylladb.cdc.worker.Worker;
 
@@ -56,17 +56,17 @@ public class Master {
     }
   }
 
-  private Queue<Task> splitStreams(Set<ByteBuffer> streamIds, SortedSet<Token> tokens) {
+  private Queue<Task> splitStreams(Set<StreamId> streamIds, SortedSet<Token> tokens) {
     Queue<Task> tasks = new ArrayDeque<>();
 
     List<DecoratedKey> decorated = new ArrayList<>(streamIds.size());
-    for (ByteBuffer b : streamIds) {
-      decorated.add(new DecoratedKey(b, partitioning.getToken(b)));
+    for (StreamId id : streamIds) {
+      decorated.add(new DecoratedKey(id.bytes, partitioning.getToken(id.bytes)));
     }
 
     Collections.sort(decorated);
 
-    SortedSet<ByteBuffer> wraparoundVnode = new TreeSet<ByteBuffer>();
+    SortedSet<StreamId> wraparoundVnode = new TreeSet<>();
 
     Iterator<DecoratedKey> streamsIt = decorated.iterator();
     DecoratedKey s = streamsIt.next();
@@ -75,15 +75,15 @@ public class Master {
     Token t = tokensIt.next();
 
     while (s != null && s.token.compareTo(t) <= 0) {
-      wraparoundVnode.add(s.key);
+      wraparoundVnode.add(new StreamId(s.key));
       s = streamsIt.hasNext() ? streamsIt.next() : null;
     }
 
     while (s != null && tokensIt.hasNext()) {
-      SortedSet<ByteBuffer> vnode = new TreeSet<>();
+      SortedSet<StreamId> vnode = new TreeSet<>();
       t = tokensIt.next();
       while (s != null && s.token.compareTo(t) <= 0) {
-        vnode.add(s.key);
+        vnode.add(new StreamId(s.key));
         s = streamsIt.hasNext() ? streamsIt.next() : null;
       }
       if (!vnode.isEmpty()) {
@@ -92,9 +92,9 @@ public class Master {
     }
 
     if (s != null) {
-      wraparoundVnode.add(s.key);
+      wraparoundVnode.add(new StreamId(s.key));
       while (streamsIt.hasNext()) {
-        wraparoundVnode.add(streamsIt.next().key);
+        wraparoundVnode.add(new StreamId(streamsIt.next().key));
       }
     }
     if (!wraparoundVnode.isEmpty()) {
@@ -112,11 +112,10 @@ public class Master {
     logger.atInfo().log("Sending tasks for generation (%s, %s) to workers - %d streams in %d groups",
         g.metadata.startTimestamp, g.metadata.endTimestamp, g.streamIds.size(), tasks.size());
     logger.atInfo().log("Streams for generation (%s, %s) are %s", g.metadata.startTimestamp, g.metadata.endTimestamp,
-        g.streamIds.stream().map(b -> Task.idToString(b)).collect(Collectors.toSet()));
+        g.streamIds);
     StringBuilder sb = new StringBuilder();
     for (Task t : tasks) {
-      sb.append("\n").append(t).append(" -> ")
-          .append(t.getStreamIds().stream().map(b -> Task.idToString(b)).collect(Collectors.toList()));
+      sb.append("\n").append(t).append(" -> ").append(t.getStreamIds());
     }
     sb.append("\n");
     logger.atInfo().log("Generation starting at %s has following vnodes: %s", g.metadata.startTimestamp, sb.toString());
@@ -124,7 +123,8 @@ public class Master {
   }
 
   private CompletableFuture<Generation> fetchNextGenerationUntilSuccess(Date previousGenerationTimestamp) {
-    return generationsFetcher.fetchNext(previousGenerationTimestamp, finished).thenApply(CompletableFuture::completedFuture)
+    return generationsFetcher.fetchNext(previousGenerationTimestamp, finished)
+        .thenApply(CompletableFuture::completedFuture)
         .exceptionally(t -> fetchNextGenerationUntilSuccess(previousGenerationTimestamp))
         .thenCompose(Function.identity());
   }
@@ -142,7 +142,8 @@ public class Master {
   }
 
   public void finish() {
-    finished.set(true);;
+    finished.set(true);
+    ;
     worker.finish();
   }
 }

@@ -1,13 +1,14 @@
 package com.scylladb.cdc;
-import java.nio.ByteBuffer;
-import java.util.Set;
+import java.util.SortedSet;
+
+import com.scylladb.cdc.common.StreamId;
 
 public class Generation {
 
   public final GenerationMetadata metadata;
-  public final Set<ByteBuffer> streamIds;
+  public final SortedSet<StreamId> streamIds;
 
-  public Generation(GenerationMetadata m, Set<ByteBuffer> s) {
+  public Generation(GenerationMetadata m, SortedSet<StreamId> s) {
     metadata = m;
     streamIds = s;
   }

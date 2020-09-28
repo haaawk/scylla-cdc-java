@@ -1,26 +1,19 @@
 package com.scylladb.cdc;
 
-import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.SortedSet;
 
-import com.google.common.io.BaseEncoding;
+import com.scylladb.cdc.common.StreamId;
 
 public class Task {
-  private final SortedSet<ByteBuffer> streamIds;
+  private final SortedSet<StreamId> streamIds;
 
-  public Task(SortedSet<ByteBuffer> ids) {
+  public Task(SortedSet<StreamId> ids) {
     streamIds = ids;
   }
 
-  public static String idToString(ByteBuffer b) {
-    byte[] bytes = new byte[16];
-    b.duplicate().get(bytes, 0, 16);
-    return BaseEncoding.base16().encode(bytes, 0, 16);
-  }
-
-  public List<ByteBuffer> getStreamIds() {
+  public List<StreamId> getStreamIds() {
     return new ArrayList<>(streamIds);
   }
 
@@ -29,6 +22,6 @@ public class Task {
     if (streamIds.isEmpty()) {
       return "empty task";
     }
-    return idToString(streamIds.iterator().next());
+    return streamIds.iterator().next().toString();
   }
 }

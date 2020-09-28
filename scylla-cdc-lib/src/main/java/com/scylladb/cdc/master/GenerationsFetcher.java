@@ -5,12 +5,16 @@ import java.time.Instant;
 import java.util.Date;
 import java.util.Optional;
 import java.util.Set;
+import java.util.SortedSet;
+import java.util.TreeSet;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.stream.Collectors;
 
 import com.scylladb.cdc.Generation;
 import com.scylladb.cdc.GenerationMetadata;
 import com.scylladb.cdc.common.FutureUtils;
+import com.scylladb.cdc.common.StreamId;
 import com.scylladb.cdc.driver.Reader;
 
 public class GenerationsFetcher {
@@ -55,17 +59,17 @@ public class GenerationsFetcher {
 
   }
 
-  private class StreamsConsumer implements Reader.Consumer<Set<ByteBuffer>, Set<ByteBuffer>> {
-    private Set<ByteBuffer> buffers = null;
+  private class StreamsConsumer implements Reader.Consumer<Set<ByteBuffer>, SortedSet<StreamId>> {
+    private SortedSet<StreamId> buffers = null;
 
     @Override
     public void consume(Set<ByteBuffer> item) {
       assert(buffers == null);
-      buffers = item;
+      buffers = new TreeSet<StreamId>(item.stream().map(b -> new StreamId(b)).collect(Collectors.toSet()));
     }
 
     @Override
-    public Set<ByteBuffer> finish() {
+    public SortedSet<StreamId> finish() {
       return buffers;
     }
 
