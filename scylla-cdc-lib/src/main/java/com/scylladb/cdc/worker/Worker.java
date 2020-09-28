@@ -101,21 +101,23 @@ public class Worker {
               return window.end();
             }
           });
-      return fut.thenComposeAsync(nextStart -> {
-        if (nextStart == window.end()) {
-          logger.atInfo().log(
-              "Fetching changes in vnode %s and window %s in generation %s finished successfully with %d changes after %d retries",
-              task, window, g.getStartTimestamp(), c.count.get(), retryCount);
-          if (window.isLast() || (Worker.this.finished && c.empty)) {
-            logger.atInfo().log("All changes has been fetched in vnode %s in generation %s. Total %d changes", task,
-                g.getStartTimestamp(), generationResultsCount + c.count.get());
-            return FutureUtils.completed(null);
+      return fut.thenCompose(nextStart -> {
+        return FutureUtils.completed(null).thenComposeAsync(ignored -> {
+          if (nextStart == window.end()) {
+            logger.atInfo().log(
+                "Fetching changes in vnode %s and window %s in generation %s finished successfully with %d changes after %d retries",
+                task, window, g.getStartTimestamp(), c.count.get(), retryCount);
+            if (window.isLast() || (Worker.this.finished && c.empty)) {
+              logger.atInfo().log("All changes has been fetched in vnode %s in generation %s. Total %d changes", task,
+                  g.getStartTimestamp(), generationResultsCount + c.count.get());
+              return FutureUtils.completed(null);
+            }
+            return fetchChangesForTask(g, task, nextStart, 0, generationResultsCount + c.count.get());
+          } else {
+            return fetchChangesForTask(g, task, nextStart, retryCount + 1, generationResultsCount);
           }
-          return fetchChangesForTask(g, task, nextStart, 0, generationResultsCount + c.count.get());
-        } else {
-          return fetchChangesForTask(g, task, nextStart, retryCount + 1, generationResultsCount);
-        }
-      }, window.wasCropped() ? delayingExecutor1s : (c.empty ? delayingExecutor30s : delayingExecutor10s));
+        }, window.wasCropped() ? delayingExecutor1s : (c.empty ? delayingExecutor30s : delayingExecutor10s));
+      });
     });
   }
 
