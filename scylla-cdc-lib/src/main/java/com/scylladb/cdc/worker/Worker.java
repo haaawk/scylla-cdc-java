@@ -53,27 +53,38 @@ public class Worker {
     });
   }
 
-  private class Consumer implements Reader.DeferringConsumer<Change> {
-    public boolean empty = true;
-    public AtomicInteger count = new AtomicInteger();
+  private class Consumer implements Reader.DeferringConsumer<Change, Integer> {
+    private final AtomicInteger count = new AtomicInteger();
 
     @Override
     public CompletableFuture<Void> consume(Change item) {
-      empty = false;
       count.incrementAndGet();
       return consumer.consume(item);
     }
 
     @Override
-    public void finish() {
-      if (!empty) {
+    public Integer finish() {
+      if (count.get() > 0) {
         // There's a race condition here but it's ok - we don't have to store the last
         // time.
         // We won't be off by more than few ms.
         lastNonEmptySelectTime.set(new Date());
       }
+      return count.get();
     }
 
+  }
+
+  private static class Result {
+    public final int count;
+    public final UUID nextStart;
+    public final boolean error;
+
+    public Result(int c, UUID s, boolean e) {
+      count = c;
+      nextStart = s;
+      error = e;
+    }
   }
 
   private CompletableFuture<Void> fetchChangesForTask(UpdateableGenerationMetadata g, Task task, UUID start,
@@ -89,34 +100,34 @@ public class Worker {
       logger.atInfo().atMostEvery(10, TimeUnit.SECONDS)
           .log("Fetching changes in vnode %s and window %s in generation %s", task, window, g.getStartTimestamp());
       Consumer c = new Consumer();
-      CompletableFuture<UUID> fut = streamsReader.query(c,
+      CompletableFuture<Result> fut = streamsReader.query(c,
           task.getStreamIds().stream().map(id -> id.bytes).collect(Collectors.toList()), window.start(), window.end())
-          .handle((ignored, e) -> {
+          .handle((count, e) -> {
             if (e != null) {
               logger.atWarning().withCause(e).log(
                   "Exception while fetching changes in vnode %s and window %s in generation %s. Replicator will retry which can cause more than once delivery. This will be %d retry",
                   task, window, g.getStartTimestamp(), retryCount + 1);
-              return start;
+              return new Result(count, start, true);
             } else {
-              return window.end();
+              return new Result(count, window.end(), false);
             }
           });
-      return fut.thenCompose(nextStart -> {
+      return fut.thenCompose(result -> {
         return FutureUtils.completed(null).thenComposeAsync(ignored -> {
-          if (nextStart == window.end()) {
+          if (!result.error) {
             logger.atInfo().log(
                 "Fetching changes in vnode %s and window %s in generation %s finished successfully with %d changes after %d retries",
-                task, window, g.getStartTimestamp(), c.count.get(), retryCount);
-            if (window.isLast() || (Worker.this.finished && c.empty)) {
+                task, window, g.getStartTimestamp(), result.count, retryCount);
+            if (window.isLast() || (Worker.this.finished && result.count == 0)) {
               logger.atInfo().log("All changes has been fetched in vnode %s in generation %s. Total %d changes", task,
-                  g.getStartTimestamp(), generationResultsCount + c.count.get());
+                  g.getStartTimestamp(), generationResultsCount + result.count);
               return FutureUtils.completed(null);
             }
-            return fetchChangesForTask(g, task, nextStart, 0, generationResultsCount + c.count.get());
+            return fetchChangesForTask(g, task, result.nextStart, 0, generationResultsCount + result.count);
           } else {
-            return fetchChangesForTask(g, task, nextStart, retryCount + 1, generationResultsCount);
+            return fetchChangesForTask(g, task, result.nextStart, retryCount + 1, generationResultsCount);
           }
-        }, window.wasCropped() ? delayingExecutor1s : (c.empty ? delayingExecutor30s : delayingExecutor10s));
+        }, window.wasCropped() ? delayingExecutor1s : (result.count == 0 ? delayingExecutor30s : delayingExecutor10s));
       });
     });
   }

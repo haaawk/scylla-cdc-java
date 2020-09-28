@@ -27,13 +27,15 @@ import com.scylladb.cdc.common.FutureUtils;
 
 public class Reader<T> {
 
-  public static interface DeferringConsumer<U> {
+  public static interface DeferringConsumer<U, W> {
     public CompletableFuture<Void> consume(U item);
-    public void finish();
+
+    public W finish();
   }
 
   public static interface Consumer<U, W> {
     public void consume(U item);
+
     public W finish();
   }
 
@@ -51,11 +53,10 @@ public class Reader<T> {
     return session.getCluster().getMetadata().getAllHosts().size() > 1 ? ConsistencyLevel.QUORUM : ConsistencyLevel.ONE;
   }
 
-  private CompletableFuture<Void> consumeResults(DeferringConsumer<T> c, ResultSet rs) {
+  private <W> CompletableFuture<W> consumeResults(DeferringConsumer<T, W> c, ResultSet rs) {
     if (rs.getAvailableWithoutFetching() == 0) {
       if (rs.isFullyFetched()) {
-        c.finish();
-        return FutureUtils.completed(null);
+        return FutureUtils.completed(c.finish());
       }
       return FutureUtils.transformDeferred(rs.fetchMoreResults(), r -> consumeResults(c, r));
     }
@@ -63,7 +64,7 @@ public class Reader<T> {
     return c.consume(translate.apply(rs.one())).thenCompose(v -> consumeResults(c, rs));
   }
 
-  public CompletableFuture<Void> query(DeferringConsumer<T> c, Object... args) {
+  public <W> CompletableFuture<W> query(DeferringConsumer<T, W> c, Object... args) {
     return FutureUtils.transformDeferred(session.executeAsync(preparedStmt.bind(args).setConsistencyLevel(computeCL())),
         rs -> consumeResults(c, rs));
   }
@@ -96,8 +97,8 @@ public class Reader<T> {
   }
 
   public static Reader<Set<ByteBuffer>> createGenerationStreamsReader(Session s) {
-    return new Reader<Set<ByteBuffer>>(s,
-        select().column("streams").from("system_distributed", "cdc_streams_descriptions").where(eq("time", bindMarker())),
+    return new Reader<Set<ByteBuffer>>(s, select().column("streams")
+        .from("system_distributed", "cdc_streams_descriptions").where(eq("time", bindMarker())),
         r -> new TreeSet<ByteBuffer>(r.getSet(0, ByteBuffer.class)));
   }
 
